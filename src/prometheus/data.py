@@ -8,7 +8,7 @@ from enterprise.signals.parameter import function
 import enterprise.constants as const
 from enterprise.signals.selections import Selection, by_backend
 from enterprise.signals import parameter, white_signals, gp_signals, signal_base
-from enterprise.pulsar import PintPulsar
+from enterprise.pulsar import PintPulsar, FeatherPulsar
 import scipy.linalg as sl
 from scipy.signal.windows import tukey
 import pandas as pd
@@ -30,7 +30,7 @@ class Data:
     name : str
         The name of the dataset.
     psrs : list
-        List of enterprise.PintPulsar objects.
+        List of enterprise.PintPulsar or FeatherPulsar objects.
     wn_dict : dict
         Dictionary of white noise parameters.
     nfreqs : int
@@ -51,7 +51,7 @@ class Data:
 
     def __init__(self,
                  name : str,
-                 psrs : list[PintPulsar],
+                 psrs : list[PintPulsar] | list[FeatherPulsar],
                  wn_dict : dict[str, float],
                  nfreqs : int = 30,
                  psr_dists_dict : Optional[dict[str, tuple]] = None,
@@ -215,7 +215,7 @@ def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30):
 
     Parameters
     ----------
-    psr : enterprise.pulsar.PintPulsar
+    psr : enterprise.pulsar.PintPulsar or FeatherPulsar
         enterprise puslar object.
     Tspan : float
         Observation span of PTA.
@@ -261,7 +261,7 @@ def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30):
     return pta
 
 
-def build_per_psr_data_dict(psrs : list[PintPulsar],
+def build_per_psr_data_dict(psrs : list[PintPulsar] | list[FeatherPulsar],
                             wn_dict : dict[str, float],
                             nfreqs : int = 30 ,
                             psr_dists_dict : Optional[dict[str, tuple]] = None,
@@ -274,7 +274,7 @@ def build_per_psr_data_dict(psrs : list[PintPulsar],
     Parameters
     ----------
     psrs : list
-        List of enterprise.pulsar.PintPulsar objects.
+        List of enterprise.pulsar.PintPulsar (or FeatherPulsar) objects.
     wn_dict : dict
         Dictionary of white noise parameters.
     nfreqs : int
