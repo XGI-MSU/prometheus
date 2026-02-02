@@ -6,7 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "prometheus"
 version = "0.1.0"
 description = "A fast pulsar timing array analysis software."
-dependencies = []
+dependencies = [
+    "scipy",
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "tqdm",
+    "pickle",
+    "numpyro",
+    "enterprise-pulsar",
+    "typing",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
