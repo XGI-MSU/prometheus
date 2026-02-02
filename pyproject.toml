@@ -12,10 +12,8 @@ dependencies = [
     "pandas",
     "pyarrow",
     "tqdm",
-    "pickle",
     "numpyro",
     "enterprise-pulsar",
-    "typing",
 ]
 
 [tool.setuptools]
