@@ -23,14 +23,14 @@ and have SSH access to GitHub.
 Install directly with pip using SSH:
 
 ```bash
-pip install git+ssh://git@github.com/access-prometheus/prometheus.git
+pip install git+ssh://git@github.com/XGI-MSU/prometheus.git
 ```
 
 or install using a GitHub
 Personal Access Token (PAT):
 
 ```bash
-pip install git+https://<TOKEN>@github.com/access-prometheus/prometheus.git
+pip install git+https://<TOKEN>@github.com/XGI-MSU/prometheus.git
 ```
 
 ## Requirements & Conventions
