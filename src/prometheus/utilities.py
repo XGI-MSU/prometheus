@@ -25,6 +25,7 @@ us_sec = 1.e-6
 
 # reference time for CW model
 tref = 4579200000.  # 53000 * day = 53000 * 86400
+# tref = 5103735083.675296  # last observed TOA
 
 # physical constants
 c = 299792458.0
@@ -222,3 +223,46 @@ def resolve_psr_corr_matrix(correlation_matrix_name, data):
             f'Unknown pulsar correlation matrix "{correlation_matrix_name}".'
         )
 
+
+def create_gw_antenna_pattern(gwtheta, gwphi, psr_pos):
+    """
+    Create pulsar antenna pattern functions as defined
+    in Ellis, Siemens, and Creighton (2012).
+
+    Parameters
+    ----------
+    gwtheta : float
+        Polar angle sky location of CW source.
+    gwphi : float
+        Azimuthal angle sky location of CW source.
+    psr_pos : array
+        (npsrs, 3) shaped array where npsrs is the number of pulsars in the array.
+        These are the Cartesian unit vectors denoting the position of each pulsar.
+    
+    Returns
+    -------
+    (fplus, fcross, cosMu) : tuple
+        fplus and fcross are the plus and cross antenna pattern functions, respectively,
+        and are each arrays of shape (npsrs,) where npsrs are the number of pulsars
+        in the array. cosMu is an array of shape (npsrs,) and the cosine of the angle
+        between each pulsar and the GW source.
+    """
+
+    # use definition from Sesana et al 2010 and Ellis et al 2012
+    sgwphi = jnp.sin(gwphi)
+    cgwphi = jnp.cos(gwphi)
+    sgwtheta = jnp.sin(gwtheta)
+    cgwtheta = jnp.cos(gwtheta)
+
+    # this looks dumb, but it plays nice with JAX and batches across pulsars
+    mdotpos = sgwphi * psr_pos[:, 0] - cgwphi * psr_pos[:, 1]
+    ndotpos = -cgwtheta * cgwphi * psr_pos[:, 0] - cgwtheta * sgwphi * psr_pos[:, 1] \
+                + sgwtheta * psr_pos[:, 2]
+    omhatdotpos = -sgwtheta * cgwphi * psr_pos[:, 0] - sgwtheta * sgwphi * psr_pos[:, 1] \
+                    -cgwtheta * psr_pos[:, 2]
+
+    fplus = 0.5 * (mdotpos ** 2 - ndotpos ** 2) / (1 + omhatdotpos)
+    fcross = (mdotpos * ndotpos) / (1 + omhatdotpos)
+    cosMu = -omhatdotpos
+
+    return fplus, fcross, cosMu
