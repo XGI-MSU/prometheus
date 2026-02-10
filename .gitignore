@@ -220,3 +220,8 @@ __marimo__/
 
 # don't save NG20 data
 data/ng20_chimeless/
+data/NG20_chimeless/
+
+# targeted search chains from NG15 analysis
+examples/chains/SDSS_J072908.71+400836.6_det.h5
+examples/chains/SDSS_J153636.22+044127.0_det.h5

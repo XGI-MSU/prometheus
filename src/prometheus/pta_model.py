@@ -164,7 +164,7 @@ class PTAModel:
         Sigma_inv_c = self.data.Sigma_0_inv_jc + phiinv_c_pf - self.data.phiinv_0_cube_pf
 
         # get frequency-domain representation of deterministic signal (npsrs, Na_det)
-        a_det = self.det_model.get_coeffs_func(det_params, psr_phases, psr_dists)  
+        a_det = self.det_model.get_coeffs_func(det_params, psr_phases, psr_dists)
 
         # Do decentering transformation with deterministic correction
         Lc = vmap(lambda x: jsl.cholesky(x, lower=True))(Sigma_inv_c)
@@ -181,7 +181,7 @@ class PTAModel:
         loglik_aSa = -0.5*jnp.sum(vmap(lambda x, y: jnp.dot(x, jnp.dot(y, x)))(a_stochastic-self.data.a_hat_2d_pf,
                                                                                 self.data.Sigma_0_inv_jc))
         loglik_ld = -0.5*jnp.sum(self.data.Sigma_0_logdet_j)
-
+        
         # In NumPyro we define xi ~ N(0, 1). But that's just a crutch. Actually it's a
         # MvNormal. So, sneakily we just remove the logP of xi from NumPyro here
         loglik_chol = 0.5 * jnp.sum(xi * xi)
