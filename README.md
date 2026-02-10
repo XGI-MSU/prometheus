@@ -116,3 +116,13 @@ background has fixed inter-pulsar correlations.
 
 In both standard and custom modes, an optional `DeterministicModel` may be
 included when constructing a `PTAModel`.
+
+## Priors
+
+- The Fourier coefficients use zero-mean multivariate normal priors. They are generated from the "standardized" coefficients which use a standard normal prior.
+
+- If included in deterministic models, the pulsar distance parameters use normal priors.
+
+- All other parameters (e.g. those of spectral and determinstic models) use uniform priors over the bounds specified by the user. If a sampled parameter is logarithmic (e.g. $\log_{10}\mathcal{M}$), the uniform prior implies a log-uniform prior over the base parameter ($\mathcal{M}$).
+
+- To change priors, users may specify and supply an `add_ln_factor` function to the `PTAModel`. This function adds a natural-logarithmic term to the posterior evaluation.
