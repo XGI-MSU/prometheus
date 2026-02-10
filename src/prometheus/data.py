@@ -56,7 +56,8 @@ class Data:
                  nfreqs : int = 30,
                  psr_dists_dict : Optional[dict[str, tuple]] = None,
                  det_window_ext_factor : float = 2.0,
-                 nfreqs_det : int = 60):
+                 nfreqs_det : int = 60,
+                 ecorr : bool = True):
         
         self.name = name
         self.psrs = psrs
@@ -65,6 +66,7 @@ class Data:
         self.psr_dists_dict = psr_dists_dict
         self.det_window_ext_factor = det_window_ext_factor
         self.nfreqs_det = nfreqs_det
+        self.ecorr = ecorr
 
         # remove red noise parameters (if any) from "white noise" dictionary
         self.wn_dict = dict()
@@ -79,7 +81,8 @@ class Data:
                                                          self.nfreqs,
                                                          self.psr_dists_dict,
                                                          self.det_window_ext_factor,
-                                                         self.nfreqs_det)
+                                                         self.nfreqs_det,
+                                                         self.ecorr)
         
         # general PTA attributes
         self.psr_names = list(self.per_psr_data_dict.keys())
@@ -208,7 +211,7 @@ def powerlaw(f, log10_A=-16, gamma=5, components=2):
     return pl
 
 
-def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30):
+def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30, ecorr=True):
     """
     Build single pulsar enterprise PTA object.
     Used to compute TNT, TNr, etc.
@@ -227,6 +230,9 @@ def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30):
         to regularize covariance matrices.
     ncomponents : int
         Number of frequency bins to use in pulsar noise model.
+    ecorr : bool
+        Whether or not to include ECORR in white noise model.
+        Defaults to True.
 
     Returns
     -------
@@ -238,7 +244,6 @@ def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30):
     # white noise parameters (set later with dictionary)
     efac = parameter.Constant()
     t2equad = parameter.Constant()
-    ecorr = parameter.Constant()
 
     # red noise parameters
     rn_log10_A = parameter.Constant(log10_Arn)
@@ -248,14 +253,18 @@ def build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=30):
     mn = white_signals.MeasurementNoise(efac=efac,              # type: ignore
                                         log10_t2equad=t2equad,
                                         selection=selection)
-    ec = white_signals.EcorrKernelNoise(log10_ecorr=ecorr,      # type: ignore
-                                        selection=selection)
     rn_pl = powerlaw(log10_A=rn_log10_A, gamma=gamma)           # type: ignore
     rn = gp_signals.FourierBasisGP(spectrum=rn_pl, components=ncomponents, Tspan=Tspan)
     tm = gp_signals.MarginalizingTimingModel(use_svd=True)
 
-    # build model and PTA
-    model = tm + mn + ec + rn   # type: ignore
+    # build PTA model
+    if ecorr:
+        ecorr = parameter.Constant()
+        ec = white_signals.EcorrKernelNoise(log10_ecorr=ecorr,      # type: ignore
+                                            selection=selection)
+        model = tm + mn + ec + rn   # type: ignore
+    else:
+        model = tm + mn + rn   # type: ignore
     pta = signal_base.PTA([model(psr)])
 
     return pta
@@ -266,7 +275,8 @@ def build_per_psr_data_dict(psrs : list[PintPulsar] | list[FeatherPulsar],
                             nfreqs : int = 30 ,
                             psr_dists_dict : Optional[dict[str, tuple]] = None,
                             det_window_ext_factor : float = 1.0,
-                            nfreqs_det : int = 60):
+                            nfreqs_det : int = 60,
+                            ecorr : bool = True):
     """
     Build data dictionary which stores data and
     associated objects needed for analysis.
@@ -290,6 +300,9 @@ def build_per_psr_data_dict(psrs : list[PintPulsar] | list[FeatherPulsar],
     nfreqs_det : int
         Number of frequency bins used to represent deterministic
         signal in frequency-domain. Defaults to 60.
+    ecorr : bool
+        Whether or not to include ECORR in white noise model.
+        Defaults to True.
 
     Returns
     -------
@@ -318,7 +331,8 @@ def build_per_psr_data_dict(psrs : list[PintPulsar] | list[FeatherPulsar],
             nfrequencies = nfreqs
 
             # enterprise PTA object of one pulsar
-            pta_psr = build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33, ncomponents=nfrequencies)
+            pta_psr = build_psr_model(psr, Tspan, log10_Arn=-12, gamma=4.33,
+                                      ncomponents=nfrequencies, ecorr=ecorr)
 
             # set white noise parameters
             pta_psr.set_default_params(wn_dict)

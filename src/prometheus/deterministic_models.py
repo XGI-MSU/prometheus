@@ -121,6 +121,7 @@ class DeterministicModel:
         det_residuals_windowed = self.data.Tukey_det * det_residuals
         # do FFT
         det_fft = jnp.fft.fft(det_residuals_windowed, n=None, axis=-1, norm=None)  # dim (Np, 2 * Nf + 2)
+    
         # apply time shift to set initial time
         det_fft *= jnp.exp(-1.j * 2 * jnp.pi * self.data.freqs_forFFT * self.data.sparse_toas_det[:, 0:1])
         
@@ -133,6 +134,7 @@ class DeterministicModel:
         #                         .transpose((0, 2, 1)).reshape((self.data.npsrs, self.data.ncomponents + 2))
         coeff = jnp.concatenate((a_n, b_n), axis=1).reshape((self.data.npsrs, 2, self.nfreqs + 1))\
                         .transpose((0, 2, 1)).reshape((self.data.npsrs, self.data.num_coeff_det + 2))
+
         return coeff[:, 2:]  # remove DC
 
 
