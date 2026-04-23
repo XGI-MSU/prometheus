@@ -31,9 +31,7 @@ class SpectralModel:
     get_phi_cube_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
         A function which takes an array of parameter values of shape (Nparam,)
         where 'Nparam' is the total number of parameters of the spectral model and
-        an array of frequencies of shape (2*Nf,) where 'Nf' is the number of
-        unique frequency bins. The frequency array should be repeated for the two
-        bases- sine and cosine, e.g. [1/Tspan, 1/Tspan, 2/Tspan, 2/Tspan, ...].
+        an array of frequencies of shape (Nf,) where 'Nf' is the number of frequency bins. 
         The function should output a (2*Nf, Npsrs, Npsrs) array where 'Npsrs' is the
         number of pulsars in the array. The (i, j, k) element of the output array
         is the (prior) covariance of ith Fourier coefficient in pulsars j and k.
@@ -47,6 +45,7 @@ class SpectralModel:
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
                  get_phi_cube_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+                 additional_ln_factor : Optional[Callable] = None,
                  ):
         
         self.name = name
@@ -55,6 +54,7 @@ class SpectralModel:
         self.param_maxs = self.parameter_bounds[..., 1]
         self.nparams_base = self.param_mins.shape[0]
         self.data = data
+        self.additional_ln_factor = additional_ln_factor
 
         if get_phi_cube_func is None:
             raise ValueError("get_phi_cube_func must be provided.")
@@ -71,14 +71,13 @@ class SpectralModel:
         params : array
             Array of spectral-hyper-parameters.
         freqs : array
-            Array of shape (2*Nf,) of frequencies, where Nf is the number
-            of frequency bins modeled. Each frequency should be repeated
-            for the sine/cosine basis, e.g. [1/Tspan, 1/Tspan, 2/Tspan, 2/Tspan,...].
+            Array of shape (Nf,) of frequencies, where Nf is the number
+            of frequency bins modeled.
         
         Returns
         -------
         phi_cube : array
-            Array of shape (2*Nf, Npsrs, Npsrs) where Nf is the number of frequency
+            Array of shape (2Nf, Npsrs, Npsrs) where Nf is the number of frequency
             bins modeled and Npsrs is the number of pulsars in the array. This 
             array is the prior covariance of the Fourier coefficients such that
             the (i, j, k) element is the covariance of the ith Fourier coefficient
@@ -90,9 +89,9 @@ class SpectralModel:
 class IndependentSpectralModel(SpectralModel):
 
     """
-    Spectral model which vectorizes across pulsars. Used primarily for 
+    Spectral model which batched across pulsars. Used primarily for 
     pulsar noise models, where each pulsar uses the same (statistically
-    independent) model (e.g. power law).
+    independent) model (e.g. a power law).
 
     Inherits from :class:`SpectralModel`.
 
@@ -111,13 +110,11 @@ class IndependentSpectralModel(SpectralModel):
     get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
         A function which takes an array of parameter values of shape (Nparam,)
         where 'Nparam' is the number of parameters of the spectral model and
-        an array of frequencies of shape (2*Nf,) where 'Nf' is the number of
-        unique frequency bins. The frequency array should be repeated for the two
-        bases- sine and cosine, e.g. [1/Tspan, 1/Tspan, 2/Tspan, 2/Tspan, ...].
-        The function outputs an array of shape (2*Nf,) which is the diagonal
-        elements of prior covariance matrix for the Fourier coefficients obeying
-        that spectral model. The output array must should use units of [ns]^2.
-        See spectra.py for examples.
+        an array of frequencies of shape (Nf,) where 'Nf' is the number of
+        unique frequency bins. The function outputs an array of shape (2*Nf,)
+        which is the diagonal elements of prior covariance matrix for the Fourier
+        coefficients obeying that spectral model. The output array must should
+        use units of [ns]^2. See spectra.py for examples.
     """
 
     def __init__(self,
@@ -125,9 +122,11 @@ class IndependentSpectralModel(SpectralModel):
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
                  get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+                 additional_ln_factor : Optional[Callable] = None
                  ):
         
         self.get_phi_diag_func = get_phi_diag_func
+        self.additional_ln_factor = additional_ln_factor
 
         # vectorize spectral model over all pulsars
         # so each pulsar gets an identical independent model
@@ -146,14 +145,13 @@ class IndependentSpectralModel(SpectralModel):
             params : array
                 Array of spectral-hyper-parameters.
             freqs : array
-                Array of shape (2*Nf,) of frequencies, where Nf is the number
-                of frequency bins modeled. Each frequency should be repeated
-                for the sine/cosine basis, e.g. [1/Tspan, 1/Tspan, 2/Tspan, 2/Tspan,...].
+                Array of shape (Nf,) of frequencies, where Nf is the number
+                of frequency bins modeled.
             
             Returns
             -------
             phi_cube : array
-                Array of shape (2*Nf, Npsrs, Npsrs) where Nf is the number of frequency
+                Array of shape (2Nf, Npsrs, Npsrs) where Nf is the number of frequency
                 bins modeled and Npsrs is the number of pulsars in the array. This 
                 array is the prior covariance of the Fourier coefficients such that
                 the (i, j, k) element is the covariance of the ith Fourier coefficient
@@ -170,13 +168,14 @@ class IndependentSpectralModel(SpectralModel):
             parameter_bounds=parameter_bounds,
             data=data,
             get_phi_cube_func=get_phi_cube_func,
+            additional_ln_factor=additional_ln_factor,
         )
 
 
 class CommonSpectralModel(SpectralModel):
 
     """
-    Spectral model which implements a common process over pulsar under
+    Spectral model which implements a common process over pulsars under
     some correlation pattern. Used primarily for stochastic gravitational
     wave background models.
 
@@ -197,13 +196,11 @@ class CommonSpectralModel(SpectralModel):
     get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
         A function which takes an array of parameter values of shape (Nparam,)
         where 'Nparam' is the number of parameters of the spectral model and
-        an array of frequencies of shape (2*Nf,) where 'Nf' is the number of
-        unique frequency bins. The frequency array should be repeated for the two
-        bases- sine and cosine, e.g. [1/Tspan, 1/Tspan, 2/Tspan, 2/Tspan, ...].
-        The function outputs an array of shape (2*Nf,) which is the diagonal
-        elements of prior covariance matrix for the Fourier coefficients obeying that
-        spectral model. The covariance matrix should use units of [ns]^2.
-        See spectra.py for examples.
+        an array of frequencies of shape (Nf,) where 'Nf' is the number of
+        unique frequency bins. The function outputs an array of shape (2*Nf,)
+        which is the diagonal elements of prior covariance matrix for the Fourier
+        coefficients obeying that spectral model. The output array must should
+        use units of [ns]^2. See spectra.py for examples.
     correlation_matrix : str or array
         A (Npsrs, Npsrs) array where Npsrs is the number of pulsars in the PTA.
         The array is the correlation pattern between pulsars, e.g. element (i, j)
@@ -221,10 +218,12 @@ class CommonSpectralModel(SpectralModel):
                  data : Data,
                  get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
                  correlation_matrix : str | np.ndarray | jnp.ndarray,
-                 nfreqs : Optional[int] = None):
+                 nfreqs : Optional[int] = None,
+                 additional_ln_factor : Optional[Callable] = None):
         self.data = data
         self.get_phi_diag_func = get_phi_diag_func
         self.nfreqs = nfreqs or data.nfreqs
+        self.additional_ln_factor = additional_ln_factor
 
         # zeros to append to spectrum if user requests
         # fewer frequency bins than in data object
@@ -248,9 +247,8 @@ class CommonSpectralModel(SpectralModel):
             params : array
                 Array of spectral-hyper-parameters.
             freqs : array
-                Array of shape (2*Nf,) of frequencies, where Nf is the number
-                of frequency bins modeled. Each frequency should be repeated
-                for the sine/cosine basis, e.g. [1/Tspan, 1/Tspan, 2/Tspan, 2/Tspan,...].
+                Array of shape (Nf,) of frequencies, where Nf is the number
+                of frequency bins modeled.
 
             Returns
             -------
@@ -271,5 +269,6 @@ class CommonSpectralModel(SpectralModel):
             parameter_bounds=parameter_bounds,
             data=data,
             get_phi_cube_func=get_phi_cube_func,
+            additional_ln_factor=additional_ln_factor,
         )
 

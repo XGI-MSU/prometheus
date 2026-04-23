@@ -1,18 +1,18 @@
 # Prometheus
 
-_Prometheus_ is a fast pulsar timing array analysis package. It's not as modular as [Enterprise](https://github.com/nanograv/enterprise) or [Discovery](https://github.com/nanograv/discovery), but supports common models for intrinsic pulsar noise and a stochastic gravitational wave background. Deterministic signals are supported, so fast fully joint analyses may be performed.
+_Prometheus_ is a fast pulsar timing array analysis package which supports common models for intrinsic pulsar noise and a stochastic gravitational wave background. Deterministic signals are supported, so fast fully joint analyses may be performed.
 
 On a NVIDIA GeForce RTX 3090, parameter estimation on the NANOGrav 15-year data set takes ~15 minutes!
 
-The posterior density sampled in **Prometheus** is equivalent to that of **Enterprise**. However, in implementation they differ in three ways:
+The posterior density sampled in **Prometheus** is equivalent to that of the [Enterprise](https://github.com/nanograv/enterprise) software. However, in implementation they differ in three ways:
 
 1) The Fourier coefficients representing stochastic timing delays are directly sampled in **Prometheus**, rather than integrated from the model. That is, they are numerically marginalized over instead of analytically marginalized.
 
-2) The Fourier coefficients are sampled under a standardizing coordinate transform, so their prior is that of a standard normal distribution.
+2) The Fourier coefficients are sampled under a standardizing coordinate transform, so they approximately obey a standard normal distribution.
 
 3) Deterministic signals are represented in a Fourier basis (under the hood) to retain a hyper-efficient posterior formulation.
 
-The posterior is implemented in [JAX](https://jax.readthedocs.io/en/latest/) and supports JIT and automatic differentiation methods. The sampling is performed with [NumPyro's No U-Turn Sampler](https://num.pyro.ai/en/stable/mcmc.html#id7).
+The posterior is implemented in [JAX](https://jax.readthedocs.io/en/latest/) which supports JIT and automatic differentiation methods. The posterior sampling is performed using [NumPyro's No U-Turn Sampler](https://num.pyro.ai/en/stable/mcmc.html#id7).
 
 ## Installation
 
@@ -93,8 +93,7 @@ See the `tests` folder where `float32` stability and the Fourier representation 
 
 ## PTA Models (`pta_model.py`)
 
-The joint posterior and NumPyro sampling model are implemented as methods of
-the `prometheus.pta_model.PTAModel` class.
+The `prometheus.pta_model.PTAModel` class contains the constituent signal and noise models. It builds a NumPyro probabilistic sampling model and posterior samples can be obtained via NumPyro's NUTS implementation.
 
 A `PTAModel` can be constructed in one of two operational modes:
 
@@ -117,12 +116,15 @@ background has fixed inter-pulsar correlations.
 In both standard and custom modes, an optional `DeterministicModel` may be
 included when constructing a `PTAModel`.
 
+Prometheus' **standard** mode is illustrated below.
+![standard_mode](prometheus.png)
+
 ## Priors
 
-- The Fourier coefficients use zero-mean multivariate normal priors. They are generated from the "standardized" coefficients which use a standard normal prior.
+- The Fourier coefficients use zero-mean multivariate normal priors.
 
 - If included in deterministic models, the pulsar distance parameters use normal priors.
 
 - All other parameters (e.g. those of spectral and determinstic models) use uniform priors over the bounds specified by the user. If a sampled parameter is logarithmic (e.g. $\log_{10}\mathcal{M}$), the uniform prior implies a log-uniform prior over the base parameter ($\mathcal{M}$).
 
-- To change priors, users may specify and supply an `add_ln_factor` function to the `PTAModel`. This function adds a natural-logarithmic term to the posterior evaluation.
+- To alter priors, users may supply an `additional_ln_factor` function as input to the to desired model (e.g. `IndependentSpectralModel`, `CommonSpectralModel`, `DeterministicModel`). This function adds a natural-logarithmic term to the posterior evaluation. See examples in the `advanced_modeling` folder. 
