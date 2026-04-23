@@ -35,11 +35,6 @@ class DeterministicModel:
         A JAX friendly function which maps the parameters of the deterministic
         model to the frequency representation of the signal. If None, defaults
         to the FFT method below.
-    null : bool
-        Whether or not to use the 'null' determinstic model. The null deterministic
-        model depends on no parameters and induces no timing delays. This is to avoid
-        branching down the pipeline: technically Prometheus always includes a deterministic
-        signal. If the user doesn't specify a deterministic signal, use the null model.
     with_psr_params : bool
         Deterministic signals from individual binaries depend on a set of (npsr) pulsar
         phase parameters and (npsr) pulsar distance parameters, where npsr is the number
@@ -55,8 +50,9 @@ class DeterministicModel:
                  get_delays_func : Callable,
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  get_coeffs_func : Optional[Callable] = None,
-                 null : Optional[bool] = False,
-                 with_psr_params : Optional[bool] = True):
+                 with_psr_params : Optional[bool] = True,
+                 additional_ln_factor : Optional[Callable] = None):
+        
         self.name = name
         self.data = data
         self.get_delays_func = get_delays_func
@@ -65,8 +61,8 @@ class DeterministicModel:
         self.param_mins = self.parameter_bounds[:, 0]
         self.param_maxs = self.parameter_bounds[:, 1]
         self.nparams = self.param_mins.shape[0]
-        self.null = null
         self.with_psr_params = with_psr_params
+        self.additional_ln_factor = additional_ln_factor
 
         # if pulsar parameters not needed for model, wrap input function
         self.get_delays_func = jax.jit(self._wrap_delays_func(self.get_delays_func,
@@ -130,8 +126,6 @@ class DeterministicModel:
         b_n = jnp.real(det_fft[:, :self.data.Nsparse // 2]) * (2 / self.data.Nsparse)  # (Np, Nf + 1)
 
         # interweave sine/cosine coefficients and reshape to (Np, 2 * Nf)
-        # coeff = jnp.concatenate((a_n, b_n), axis=1).reshape((self.data.npsrs, 2, self.data.nfreqs + 1))\
-        #                         .transpose((0, 2, 1)).reshape((self.data.npsrs, self.data.ncomponents + 2))
         coeff = jnp.concatenate((a_n, b_n), axis=1).reshape((self.data.npsrs, 2, self.nfreqs + 1))\
                         .transpose((0, 2, 1)).reshape((self.data.npsrs, self.data.num_coeff_det + 2))
 
@@ -152,40 +146,4 @@ class DeterministicModel:
             def wrapped(toas, psrpos, params, psr_phases, psr_dists):
                 return func(toas, psrpos, params)
             return wrapped
-
-
-def build_null_deterministic_model(data):
-    """
-    Function which builds the 'null' DeterministicModel instance.
-
-    When the user doesn't supply a deterministic model, i.e. they
-    only desire a stochastic analysis, the null deterministic model
-    is used to avoid branching in the pipepline. When in use,
-    the null model doesn't sample any parameters, and the delays
-    induced are fixed to zero.
     
-    Parameters
-    ----------
-    data : Data
-        An instance of the Data object found in the data.py module.
-
-    Returns
-    -------
-    null_deterministic_model : DeterministicModel
-        An instance of the DeterministicModel class which induces
-        zero timing delays.
-    """
-    def null_det_delays(toas, psrpos, parameter_values, psr_phases, psr_dists):
-        return jnp.zeros_like(toas)
-    
-    def null_get_coeffs_func(parameter_values, psr_phases, psr_dists):
-        return jnp.zeros((data.npsrs, data.num_coeff_det))
-    
-    null_deterministic_model = DeterministicModel(name='null_model',
-                                                  data=data,
-                                                  get_delays_func=null_det_delays,
-                                                  parameter_bounds=jnp.zeros((2, 2)),
-                                                  get_coeffs_func=null_get_coeffs_func,
-                                                  null=True,
-                                                  with_psr_params=False)
-    return null_deterministic_model
