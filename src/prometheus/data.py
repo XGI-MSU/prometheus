@@ -89,8 +89,7 @@ class Data:
         self.npsrs = len(self.psr_names)
         self.Tspan = self.per_psr_data_dict[self.psr_names[0]]['Tspan']
         self.ncomponents = 2 * self.nfreqs
-        self.freqs_unique = (jnp.arange(int(self.ncomponents/2))+1)/self.Tspan
-        self.freqs = self.freqs_unique.repeat(2)
+        self.freqs = jnp.arange(1, self.nfreqs + 1) / self.Tspan
         
         # pulsar sky locations
         self.psr_phi = jnp.array([self.per_psr_data_dict[name]['phi']
@@ -121,6 +120,10 @@ class Data:
         self.Sigma_0_logdet_j = jnp.array(np.sum([self.per_psr_data_dict[psrname]['logdet']\
                                                   for psrname in self.psr_names]))
         self.Si0_a_hat_j = jnp.dot(self.Sigma_0_inv_j, self.a_hat_j) * utils.renorm
+        self.FNFs = jnp.array([self.per_psr_data_dict[psrname]['TNT'] / utils.renorm**2
+                               for psrname in self.psr_names])
+        self.FNrs = jnp.array([self.per_psr_data_dict[psrname]['TNr'] / utils.renorm
+                               for psrname in self.psr_names])
 
         # Also make phiinv_0 cubed. For vmap, need it in both forms:
         # - Npsr x (nfreqs x nfreqs) and

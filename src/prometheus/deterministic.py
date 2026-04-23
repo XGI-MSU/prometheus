@@ -6,7 +6,6 @@ the timing delays induced by a continuous wave is found here.
 
 import jax.numpy as jnp
 from jax import lax
-from jax.scipy.stats import norm
 
 from . import utilities as utils
 
@@ -55,52 +54,12 @@ def get_psr_phase(cw_source_params, psr_position, psr_dist):
     return psr_phase
 
 
-def ln_p_PX(value, dist, err):
-    """
-    Parallax-based prior on pulsar distance (Arzoumanian+ 2023 Eq. 20)
-    p(d) ∝ N(1/d | 1/dist, err/dist^2) * 1/d^2
-    """
-    pi = 1.0 / dist
-    pi_err = err / dist**2
-    inv_value = 1.0 / value
-    z = (inv_value - pi) / pi_err
-    lnprob = -0.5 * z**2 - jnp.log(jnp.sqrt(2 * jnp.pi) * pi_err * value**2)
-    lnprob = jnp.where(value > 0, lnprob, -jnp.inf)
-    return lnprob
-
-
-def ln_p_DM(value, dist, err):
-    """
-    DM-based prior on pulsar distance (Arzoumanian+ 2023 Eq. 21)
-    Flat between dist±err, Gaussian tails outside that range.
-    """
-    sigma = 0.25 * err
-    boxheight = 1.0 / (2.0 * err)
-    gaussheight = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
-    scale = boxheight / gaussheight
-    area = 1.0 + scale  # normalization factor
-
-    left  = norm.pdf(value, loc=dist - err, scale=sigma) * scale
-    mid   = boxheight
-    right = norm.pdf(value, loc=dist + err, scale=sigma) * scale
-
-    y = jnp.where(
-        value <= (dist - err), left,
-        jnp.where(value < (dist + err), mid, right)
-    )
-    lnprob = jnp.log(y / area + 1e-12)
-    lnprob = jnp.where(value > 0, lnprob, -jnp.inf)
-    return lnprob
-
-
 def cw_delay_evolve_low_freq_float32(toas, psr_pos, source_params, psr_phases, psr_dists):
     """
     Get the delays across pulsars induced by an evolving continuous gravitational
     wave from an individual supermassive black hole binary (including pulsar term)
     as in Ellis et. al 2012, 2013. This function IS float32 compatible. This function
-    is only accurate for low CW frequencies: (log10_f < -8.2). It is more efficient
-    for these low frequencies than "cw_delay_evolve_float32" which uses branches to
-    cover more frequency bins.
+    is only accurate for low CW frequencies: (log10_f < -8.2).
     
     Parameters
     ----------
@@ -193,12 +152,15 @@ def cw_delay_evolve_low_freq_float32(toas, psr_pos, source_params, psr_phases, p
     return res * utils.renorm  # (Np, Nsparse)
 
 
-def cw_delay_evolve_float32(toas, psr_pos, source_params, psr_phases, psr_dists):
+def cw_delay_evolve_float32_TESTING(toas, psr_pos, source_params, psr_phases, psr_dists):
     
     """
     Get the delays across pulsars induced by an evolving continuous gravitational
     wave from an individual supermassive black hole binary (including pulsar term)
     as in Ellis et. al 2012, 2013. This function IS float32 compatible.
+
+    This function is in TESTING. It's purpose is to work better in float32 precision
+    at high frequencies.
     
     Parameters
     ----------
@@ -402,7 +364,7 @@ def cw_delay_evolve_float64(toas, psr_pos, source_params, psr_phases, psr_dists)
     Get the delays across pulsars induced by an evolving continuous gravitational
     wave from an individual supermassive black hole binary (including pulsar term)
     as in Ellis et. al 2012, 2013. This function is NOT float32 compatible and is
-    used primarily to test the accuracy of the float32 version below.
+    used primarily to test the accuracy of the float32 version.
     
     Parameters
     ----------
@@ -495,77 +457,4 @@ def cw_delay_evolve_float64(toas, psr_pos, source_params, psr_phases, psr_dists)
     # residuals
     res = fplus[:, None] * (rplus_p - rplus) + fcross[:, None] * (rcross_p - rcross)
     return res * utils.renorm   # (Np, Nsparse)
-
-
-# TODO: TEST THIS MODEL FOR SINGLE PRECISION AND CONVERGENCE WITH ENTERPRISE
-# def cw_delay_monochromatic(toas, psr_pos, cw_source_params):
-#     """
-#     Returns the timing delays due to a non-evolving continuous
-#     gravitational wave from an individual supermassive black
-#     hole binary.
-    
-#     Parameters
-#     ----------
-#     toas : array
-#         (npsrs, ntoas) shaped array where npsrs and ntoas are the number of pulsars
-#         and number of toas per pulsar respectively. Note these toas need not be
-#         the actual observed TOAs of the array, and in implementation they are not.
-#         In deterministic models, the TOAs are a set of evenly spaced uniform TOAs
-#         used in the FFT.
-#     psr_pos : array
-#         (npsrs, 3) shaped array where npsrs is the number of pulsars in the array.
-#         These are the Cartesian unit vectors giving the position of each pulsar.
-#     source_params : array
-#         Array of shape (8,) storing parameters of the CW source. We use the ordering:
-#         log10(chirp mass [solar masses]), log10(frequency [Hz]), cosine(inclination angle),
-#         polarization angle, log10(characteristic strain), cosine(polar angle of sky location),
-#         azimuthal angle of sky location, initial phase.
-    
-#     Returns
-#     res : array
-#         Array of same shape as 'toas' input. This is the delays in the timing residuals
-#         induced by the continuous wave in units of ns.
-#     -------
-#     """
-
-#     log10_mc, log10_fgw, cos_inc, psi, log10_h, cos_gwtheta, gwphi, phase0 = cw_source_params
-    
-#     # convert units to time
-#     mc = 10 ** log10_mc * utils.Tsun
-#     fgw = 10 ** log10_fgw
-#     gwtheta = jnp.arccos(cos_gwtheta)
-#     inc = jnp.arccos(cos_inc)
-#     dist = 2 * mc ** (5 / 3) * (jnp.pi * fgw) ** (2 / 3) / 10**log10_h
-
-#     # get antenna pattern funcs and cosMu
-#     # write function to get pos from theta,phi
-#     fplus, fcross, cosMu = create_gw_antenna_pattern(gwtheta, gwphi, psr_pos)
-
-#     # get pulsar time
-#     toas_copy = toas - utils.tref
-
-#     # orbital frequency
-#     phase0 = phase0 / 2  # convert GW to orbital phase
-
-#     # monochromatic
-#     omega = jnp.pi * fgw
-
-#     # phases
-#     phase = phase0 + omega * toas_copy
-
-#     # define time dependent coefficients
-#     At = -0.5 * jnp.sin(2 * phase) * (3 + jnp.cos(2 * inc))
-#     Bt = 2 * jnp.cos(2 * phase) * jnp.cos(inc)
-
-#     # now define time dependent amplitudes
-#     alpha = mc ** (5.0 / 3.0) / (dist * omega ** (1.0 / 3.0))
-
-#     # define rplus and rcross
-#     rplus = alpha * (-At * jnp.cos(2 * psi) + Bt * jnp.sin(2 * psi))
-#     rcross = alpha * (At * jnp.sin(2 * psi) + Bt * jnp.cos(2 * psi))
-
-#     # residuals
-#     res = fplus[:, None] * rplus + fcross[:, None] * rcross
-    
-#     return -res * utils.renorm
 
