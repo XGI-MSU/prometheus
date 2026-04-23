@@ -1,17 +1,17 @@
 '''Store full PTA modeling including posterior and sampling model.'''
 
 
-from jax import jit, vmap
+from jax import vmap
 import jax.numpy as jnp
-import jax.random as jr
 import jax.scipy.linalg as jsl
 import numpyro
 import numpyro.distributions as dist
 from typing import Optional, Callable
 
 from .spectral_models import SpectralModel, IndependentSpectralModel, CommonSpectralModel
-from .deterministic_models import DeterministicModel, build_null_deterministic_model
+from .deterministic_models import DeterministicModel
 from . import utilities as utils
+from . import posterior
 
 
 
@@ -65,14 +65,12 @@ class PTAModel:
                  psr_model : Optional[IndependentSpectralModel] = None,
                  gwb_model : Optional[CommonSpectralModel] = None,
                  spectral_model : Optional[SpectralModel] = None,
-                 det_model : Optional[DeterministicModel] = None,
-                 add_ln_factor : Optional[Callable] = None):
+                 det_model : Optional[DeterministicModel] = None):
         
         self.psr_model = psr_model
         self.gwb_model = gwb_model
         self.spectral_model = spectral_model
         self.det_model = det_model
-        self.add_ln_factor = add_ln_factor
         
         # determine which mode: 'standard' or 'custom'
         if self.spectral_model is not None:
@@ -91,121 +89,14 @@ class PTAModel:
         self.npsrs = self.data.npsrs
         self.ncomponents = self.data.ncomponents
 
-        # if no deterministic model is supplied, use null model
+        # check if user specified a deterministic model
         if self.det_model is None:
-            det_model = build_null_deterministic_model(self.data)
-            self.det_model = det_model
-
-        # posterior to test/time
-        # technically this can be sampled, but the sampling model below
-        # codes this up for us in NumPyro's probabilistic programming language
-        self.ln_posterior = self.build_posterior()
-    
-
-    def ln_posterior_components(self, xi, phi_cube, det_params, psr_phases, psr_dists):
-        """
-        Evaluates the components of the full joint posterior. The sampled posterior is equivalent
-        to that of Enterprise and other PTA analysis softwares. The implementation differences are:
-            - the Fourier coefficients are sampled numerically, rather than analytically marginalized
-            - the Fourier coefficients are sampled under a standardizing transform
-            - the deterministic signal is represented in a Fourier basis.
-        Note these 'differences' are purely in implementation. After sampling, we recover
-        a posterior distribution identical to that of other fully joint analyses.
-        
-        Parameters
-        ----------
-        self : PTAModel
-            Instance of the PTAModel class.
-        xi : array
-            Array of shape (Npsrs, 2*Nf) where Npsrs are the number of pulsars in the array
-            and Nf are the number of frequency bins modeled. These are the 'standardized'
-            Fourier coefficients, drawn from a standard normal distribution. Below they
-            are transformed with the standardizing transform to obey (approximately) the
-            spectrum given by our spectral models.
-        phi_cube : array
-            Array of shape (2*Nf, Npsrs, Npsrs) where Nf is the number of frequency bins
-            modeled and Npsrs are the number of pulsars in the array. This is the prior
-            covariance matrix for the Fourier coefficients. The (i, j, k) element of this
-            array is the covariance of the ith Fourier coefficient between pulsars j and k.
-            This array depends on a set of spectral-hyper-paramters and is constructed in
-            the 'sampling_model' method below.
-        det_params : array
-            Array of deterministic parameters. If the 'null' deterministic model is used,
-            the parameters are NoneType.
-        psr_phases : array
-            Array of shape (npsrs,) where npsrs is the number of puslars in the array.
-            The array is the phase of the deterministic GW at each pulsar. If the
-            deterministic 'null' model or a DeterministicModel with `with_psr_params=False'
-            is used, then these parameters are NoneType.
-        psr_dists : array
-            Array of shape (npsrs,) where npsrs is the number of puslars in the array.
-            The array is the distance to each pulsar. If the deterministic 'null' model
-            or a DeterministicModel with `with_psr_params=False' is used, then 
-            these parameters are NoneType.
-        
-        Returns
-        -------
-        (logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a_stochastic) : tuple
-            The components of the full joint posterior, except the last element which is
-            the transformed Fourier coefficients (transformed to obey approximately the spectral models).
-            The sum of these components is the value of the posterior density evaluated at the input
-            parameters.
-        """
-
-        # Use vmap to vectorize cho_factor and cho_solve across the batch (phi_cube)
-        phi_chol_factors = vmap(lambda x: jsl.cho_factor(x, lower=True))(phi_cube)
-        phiinvs = vmap(lambda cf: jsl.cho_solve((cf[0], True), jnp.identity(cf[0].shape[0])))(phi_chol_factors)
-        philogdets = 2*jnp.sum(jnp.log(jnp.diagonal(phi_chol_factors[0], axis1=1, axis2=2)/utils.renorm), axis=1)
-
-        # Get the CURN-based Cholesky transform quantities
-        phiinv_vecs_c_fp = jnp.diagonal(phiinvs, axis1=1, axis2=2)     # nfreqs x npsrs
-        phiinv_c_pf = jnp.zeros((self.data.phiinv_0_vecs_j.shape[0], self.data.phiinv_0_vecs_j.shape[1], self.data.phiinv_0_vecs_j.shape[1]))
-        phiinv_c_pf = phiinv_c_pf.at[:, self.data.ii_diag_pf, self.data.ii_diag_pf].set(phiinv_vecs_c_fp.T)
-        Sigma_inv_c = self.data.Sigma_0_inv_jc + phiinv_c_pf - self.data.phiinv_0_cube_pf
-
-        # get frequency-domain representation of deterministic signal (npsrs, Na_det)
-        a_det = self.det_model.get_coeffs_func(det_params, psr_phases, psr_dists)
-
-        # Do decentering transformation with deterministic correction
-        Lc = vmap(lambda x: jsl.cholesky(x, lower=True))(Sigma_inv_c)
-        TNTDas = vmap(lambda x, y: jnp.dot(x, y))(self.data.TNTDs, a_det)
-        Lca = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=0))(Lc, self.data.Si0_a_hat_j_pf - TNTDas)    # Lc @ TNr
-        LLca = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=1))(Lc, Lca)  # a-hat
-        am = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=1))(Lc, xi) # L @ xi, utils.renormalized already
-        a_stochastic = am + LLca
-
-        # The Jacobian
-        logJac = -jnp.sum(jnp.log(jnp.diagonal(Lc, axis1=1, axis2=2)))
-
-        # The value of the actual likelihood
-        loglik_aSa = -0.5*jnp.sum(vmap(lambda x, y: jnp.dot(x, jnp.dot(y, x)))(a_stochastic-self.data.a_hat_2d_pf,
-                                                                                self.data.Sigma_0_inv_jc))
-        loglik_ld = -0.5*jnp.sum(self.data.Sigma_0_logdet_j)
-        
-        # In NumPyro we define xi ~ N(0, 1). But that's just a crutch. Actually it's a
-        # MvNormal. So, sneakily we just remove the logP of xi from NumPyro here
-        loglik_chol = 0.5 * jnp.sum(xi * xi)
-
-        # The prior
-        logprior_aPa = -0.5*jnp.sum(vmap(lambda x, y: jnp.dot(x, jnp.dot(y, x)))(a_stochastic.T, phiinvs - self.data.phiinv_0_cube_fp))
-        logprior_ld = -0.5*jnp.sum(philogdets) + 0.5*self.data.phiinv_logdet_0_j
-
-        # deterministic contribution to likelihood
-        loglik_aSa += jnp.sum(vmap(lambda x, y: jnp.dot(x, y))(a_det, self.data.TDNrs))
-        loglik_aSa += -jnp.sum(vmap(lambda x, y: jnp.dot(x, y))(a_stochastic, TNTDas))
-        loglik_aSa += -0.5 * jnp.sum(vmap(lambda x, y: jnp.dot(x, jnp.dot(y, x)))(a_det, self.data.TDNTDs))
-
-        return logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a_stochastic
+            self.include_det_model = False
+        else:
+            self.include_det_model = True
 
 
-    def addition(self, logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld):
-        """
-        Add up the components of the posterior obtained from 'ln_posterior_components' to
-        evaluate the full joint posterior.
-        """
-        return logJac + loglik_aSa + loglik_ld + loglik_chol + logprior_aPa + logprior_ld
-
-    def sampling_model(self):
+    def sampling_model(self, T=1.0):
         """
         Construct the NumPyro probabilistic sampling model.
 
@@ -219,12 +110,59 @@ class PTAModel:
         modeling examples.
         """
 
-        # sample standardized Fourier coefficients
-        xi = numpyro.sample('xi', dist.Normal().expand([self.npsrs, self.ncomponents]))
+        # standard mode: user supplies a pulsar noise model and separate GWB model
+        if self.mode == 'standard':
 
-        # deterministic model
-        if not self.det_model.null: # if a non-trivial deterministic model is provided
-            # sample parameters of deterministic signal
+            # pulsar noise hyper-parameters
+            psr_params = numpyro.sample(name=self.psr_model.name,
+                                    fn=dist.Uniform(low=self.psr_model.param_mins,  
+                                                    high=self.psr_model.param_maxs,).expand([self.npsrs, self.psr_model.nparams_base]))
+
+            # build pulsar noise prior covariance
+            psr_phi_cube = self.psr_model.get_phi_cube(psr_params, self.data.freqs)
+
+            # additional ln-factor for pulsar parameters specified by user
+            if self.psr_model.additional_ln_factor is not None:
+                ln_factor_psr = self.psr_model.additional_ln_factor(psr_params)
+                numpyro.factor('additional_ln_factor_psr', ln_factor_psr)
+
+            # GWB hyper-parameters
+            gwb_params = numpyro.sample(name=self.gwb_model.name,
+                                        fn=dist.Uniform(low=self.gwb_model.param_mins,
+                                                        high=self.gwb_model.param_maxs))
+
+            # build GWB prior covariance
+            gwb_phi_cube = self.gwb_model.get_phi_cube(gwb_params, self.data.freqs)
+
+            # additional ln-factor for GWB parameters specified by user
+            if self.gwb_model.additional_ln_factor is not None:
+                ln_factor_gwb = self.gwb_model.additional_ln_factor(gwb_params)
+                numpyro.factor('additional_ln_factor_gwb', ln_factor_gwb)
+
+            # combined prior covariance matrix
+            phi_cube = psr_phi_cube + gwb_phi_cube
+        
+        
+        # custom mode: user supplies single spectral model
+        else:
+
+            # sample hyper-parameters of custom spectral model
+            spectral_params = numpyro.sample(name=self.spectral_model.name,
+                                             fn=dist.Uniform(low=self.spectral_model.param_mins,
+                                                             high=self.spectral_model.param_maxs))
+    
+            # build covariance matrix from hyper-parameters
+            phi_cube = self.spectral_model.get_phi_cube(spectral_params, self.data.freqs)
+
+            # additional ln-factor for spectral parameters specified by user
+            if self.spectral_model.additional_ln_factor is not None:
+                ln_factor_spectral = self.spectral_model.additional_ln_factor(spectral_params)
+                numpyro.factor('additional_ln_factor_spectral', ln_factor_spectral)
+        
+        # sample parameters in deterministic signal model
+        if self.include_det_model: # if a non-trivial deterministic model is provided
+            
+            # parameters of deterministic model use uniform priors
             det_params = numpyro.sample(self.det_model.name, dist.Uniform(self.det_model.param_mins,  
                                                                           self.det_model.param_maxs)) 
             if self.det_model.with_psr_params:  # if pulsar parameters are required
@@ -234,245 +172,149 @@ class PTAModel:
             else:   # if no pulsar parameters are needed for deterministic model
                 psr_phases = None
                 psr_dists = None
-        else:   # if no deterministic model is supplied
-            det_params = None
-            psr_phases = None
-            psr_dists = None
-
-        # standard mode requires a pulsar noise and GWB model
-        if self.mode == 'standard':
-            # pulsar noise hyper-parameters
-            pn_params = numpyro.sample(name=self.psr_model.name,
-                                    fn=dist.Uniform(low=self.psr_model.param_mins,  
-                                                    high=self.psr_model.param_maxs,).expand([self.npsrs, self.psr_model.nparams_base]))
             
-            # GWB hyper-parameters
-            gwb_params = numpyro.sample(name=self.gwb_model.name,
-                                        fn=dist.Uniform(low=self.gwb_model.param_mins,
-                                                        high=self.gwb_model.param_maxs))
+            # get Fourier coefficients of deterministic signal
+            a_det = self.det_model.get_coeffs_func(det_params, psr_phases, psr_dists)
 
-            # build covariance matrix from hyper-parameters
-            phi_cube = (self.psr_model.get_phi_cube(pn_params, self.data.freqs)
-                        + self.gwb_model.get_phi_cube(gwb_params, self.data.freqs))
-                
-        else:   # 'custom' mode enabled
-            # sample hyper-parameters of custom spectral model
-            spectral_params = numpyro.sample(name=self.spectral_model.name,
-                                             fn=dist.Uniform(low=self.spectral_model.param_mins,
-                                                             high=self.spectral_model.param_maxs))
-    
-            # build covariance matrix from hyper-parameters
-            phi_cube = self.spectral_model.get_phi_cube(spectral_params, self.data.freqs)
-        
-        # get components of the likelihood
-        logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                phi_cube,
-                                                                                                                det_params,
-                                                                                                                psr_phases,
-                                                                                                                psr_dists)
-        
+            # inner product needed for likelihood and standardizing transformation
+            TNTDas = vmap(lambda x, y: jnp.dot(x, y))(self.data.TNTDs / T, a_det)
+
+            # additional ln-factor for deterministic parameters specified by user
+            if self.det_model.additional_ln_factor is not None:
+                ln_factor_det = self.det_model.additional_ln_factor(det_params, psr_phases, psr_dists)
+                numpyro.factor('additional_ln_factor_det', ln_factor_det)
+
+        # sample in the space of "whitened" Fourier coefficients
+        z = numpyro.sample('z', dist.Normal().expand([self.npsrs, self.ncomponents]))
+
+        # NumPyro adds a standard normal probability density for the line above
+        # this is not in the posterior, so we need to subtract it manually
+        numpyro.factor('ln_inverse_normal_correction', 0.5 * jnp.sum(z**2))
+
+        # get Cholesky, inverse, and log-determinant of prior covariance
+        phi_chol_factors, phiinvs, phi_ln_dets = posterior.cholesky_inverse_det_phi(phi_cube)
+
+        # do standardizing transform
+        FNr_for_transform = self.data.FNrs - TNTDas if self.include_det_model else self.data.FNrs
+        a, Sigma_inv_L = posterior.standardizing_transform(z=z,
+                                                           phiinvs=phiinvs,
+                                                           FNFs=self.data.FNFs,
+                                                           FNrs=FNr_for_transform,
+                                                           T=T)
+
+        # ln-determinant Jacobian of standardizing transform
+        lndet_Jac = -jnp.sum(jnp.log(jnp.diagonal(Sigma_inv_L, axis1=1, axis2=2)))
+        numpyro.factor('ln_Jac', lndet_Jac)
+
         # save transformed coefficients (which obey spectral models)
         numpyro.deterministic('a', a)
 
-        # evaluate the full joint posterior
-        ln_posterior_value = self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-        numpyro.factor('ln_posterior', ln_posterior_value)
+        # evaluate the likelihood
+        lnlike_val = posterior.ln_likelihood(a, self.data.FNFs, self.data.FNrs, T)
+        numpyro.factor('ln_likelihood', lnlike_val)
 
-        # add additional ln-factor if provided by user
-        # (this is a mess, but it's supposed to make it easy for a user to supply
-        # additional posterior corrections using **only** their specified parameters)
-        # I don't want to use dictionary unwrapping... I **think** this is faster.
-        if self.add_ln_factor is not None:
-            if self.mode == 'standard':
-                if self.det_model.null:
-                    numpyro.factor('additional_ln_factor', self.add_ln_factor(pn_params, gwb_params))
-                else:
-                    if self.det_model.with_psr_params:
-                        numpyro.factor('additional_ln_factor', self.add_ln_factor(pn_params, gwb_params, det_params, psr_phases, psr_dists))
-                    else:
-                        numpyro.factor('additional_ln_factor', self.add_ln_factor(pn_params, gwb_params, det_params))
-            if self.mode == 'custom':
-                if self.det_model.null:
-                    numpyro.factor('additional_ln_factor', self.add_ln_factor(spectral_params))
-                else:
-                    if self.det_model.with_psr_params:
-                        numpyro.factor('additional_ln_factor', self.add_ln_factor(spectral_params, det_params, psr_phases, psr_dists))
-                    else:
-                        numpyro.factor('additional_ln_factor', self.add_ln_factor(spectral_params, det_params))
+        # evaluate the prior
+        lnprior_val = posterior.ln_normal_prior(a, phiinvs, phi_ln_dets)
+        numpyro.factor('ln_prior', lnprior_val)
 
-        return self.sampling_model
-    
+        # extra terms in log-likelihood from deterministic signal
+        if self.include_det_model:
+            lnlike_det_add = posterior.ln_likelihood_det_addition(a_det, a, self.data.TDNrs,
+                                                                  self.data.TNTDs, self.data.TDNTDs,
+                                                                  TNTDas, T)
+            numpyro.factor('ln_likelihood_det_addition', lnlike_det_add)
 
-    def get_param_names_and_shapes(self):
+
+    def marginalized_sampling_model(self):
         """
-        Get a dictionary whose keys are the names of parameters
-        used in the PTAModel and values are the required shapes
-        of the parameters.
+        NumPyro sampling model with marginalized pulsar noise coefficients.
         """
-        param_dict = dict()
-        param_dict['xi'] = (self.npsrs, self.ncomponents)
-        if self.mode == 'standard':
-            param_dict[self.psr_model.name] = (self.npsrs, self.psr_model.nparams_base)
-            param_dict[self.gwb_model.name] = (self.gwb_model.nparams_base,)
-        else:
-            param_dict[self.spectral_model.name] = (self.psr_model.nparams_base,)
-        if not self.det_model.null:
-            param_dict[self.det_model.name] = (self.det_model.nparams,)
-            if self.det_model.with_psr_params:
-                param_dict['psr_phases'] = (self.npsrs,)
-                param_dict['psr_dists'] = (self.npsrs,)
-        return param_dict
-    
 
-    def build_posterior(self):
-        """
-        Method to build the posterior, so the user only has to implement the
-        parameters **they know about**. For example, if no deterministic model
-        is in use, the user doesn't have to make up parameter values to feed 
-        the 'null' deterministic model.
+        # pulsar noise hyper-parameters
+        psr_params = numpyro.sample(name=self.psr_model.name,
+                                fn=dist.Uniform(low=self.psr_model.param_mins,  
+                                                high=self.psr_model.param_maxs,).expand([self.npsrs, self.psr_model.nparams_base]))
 
-        This posterior can technically be sampled, but a NumPyro compatible
-        sampling model is built above in the 'sampling_model' method.
-
-        This formatting is a bit of a mess. To keep the posterior efficient,
-        we want to avoid parameter dictionary unwrapping. This unfortunately
-        requires us to branch to all different model types.
-        -- if someone knows a better way to do this, please let me know...
-        """
-        if self.mode == 'standard':
-            def get_phi_cube_for_posterior(pn_params, gwb_params):
-                return (self.psr_model.get_phi_cube(pn_params, self.data.freqs)
-                        + self.gwb_model.get_phi_cube(gwb_params, self.data.freqs))
-            if self.det_model.null:
-                def ln_posterior(xi, pn_params, gwb_params):
-                    phi_cube = get_phi_cube_for_posterior(pn_params, gwb_params)
-                    logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                phi_cube,
-                                                                                                                None,
-                                                                                                                None,
-                                                                                                                None)
-                    return self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-            else:
-                if not self.det_model.with_psr_params:
-                    def ln_posterior(xi, pn_params, gwb_params, det_params):
-                        phi_cube = get_phi_cube_for_posterior(pn_params, gwb_params)
-                        logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                    phi_cube,
-                                                                                                                    det_params,
-                                                                                                                    None,
-                                                                                                                    None)
-                        return self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-                else:
-                    def ln_posterior(xi, pn_params, gwb_params, det_params, psr_phases, psr_dists):
-                        phi_cube = get_phi_cube_for_posterior(pn_params, gwb_params)
-                        logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                    phi_cube,
-                                                                                                                    det_params,
-                                                                                                                    psr_phases,
-                                                                                                                    psr_dists)
-                        return self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-        else:
-            def get_phi_cube_for_posterior(spectral_params):
-                return self.spectral_model.get_phi_cube(spectral_params, self.data.freqs)
-            if self.det_model.null:
-                def ln_posterior(xi, spectral_params):
-                    phi_cube = get_phi_cube_for_posterior(spectral_params)
-                    logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                phi_cube,
-                                                                                                                None,
-                                                                                                                None,
-                                                                                                                None)
-                    return self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-                return ln_posterior
-            else:
-                if not self.det_model.with_psr_params:
-                    def ln_posterior(xi, spectral_params, det_params):
-                        phi_cube = get_phi_cube_for_posterior(spectral_params)
-                        logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                    phi_cube,
-                                                                                                                    det_params,
-                                                                                                                    None,
-                                                                                                                    None)
-                        return self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-                else:
-                    def ln_posterior(xi, spectral_params, det_params, psr_phases, psr_dists):
-                        phi_cube = get_phi_cube_for_posterior(spectral_params)
-                        logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld, a = self.ln_posterior_components(xi,
-                                                                                                                    phi_cube,
-                                                                                                                    det_params,
-                                                                                                                    psr_phases,
-                                                                                                                    psr_dists)
-                        return self.addition(logJac, loglik_aSa, loglik_ld, loglik_chol, logprior_aPa, logprior_ld)
-        return jit(ln_posterior)
-
-
-    def draw_params_from_prior(self, seed=0):
-        """
-        Draw a set of parameters from their prior. This is not
-        efficient and is only used to test the posterior evaluation.
-        In practice, the NumPyo sampling model does this for us.
-
-        All parameters use a uniform prior. Except:
-            - xi: use a standard normal prior
-            - psr_dists: use a normal prior
-        """
-        prng_key = jr.key(seed)
-        param_dict = dict()
+        # GWB hyper-parameters
+        gwb_params = numpyro.sample(name=self.gwb_model.name,
+                                    fn=dist.Uniform(low=self.gwb_model.param_mins,
+                                                    high=self.gwb_model.param_maxs))
         
-        # add standardized Fourier coefficients
-        key = jr.split(prng_key)[1]
-        xi = jr.normal(key=key,
-                       shape=(self.npsrs, self.ncomponents))
-        param_dict['xi'] = xi
+        # draw whitened Fourier coefficients for the background
+        z = numpyro.sample(name='z', fn=dist.Normal().expand([self.npsrs, self.ncomponents]))
 
-        # spectral parameters
-        if self.mode == 'standard':
-            # pulsar noise parameters
-            key = jr.split(key)[1]
-            pn_params = jr.uniform(key=key,
-                                   shape=(self.npsrs, self.psr_model.nparams_base),
-                                   minval=self.psr_model.param_mins,
-                                   maxval=self.psr_model.param_maxs)
-            param_dict[self.psr_model.name] = pn_params
-            # GWB parameters
-            key = jr.split(key)[1]
-            gwb_params = jr.uniform(key=key,
-                                    shape=(self.gwb_model.nparams_base,),
-                                    minval=self.gwb_model.param_mins,
-                                    maxval=self.gwb_model.param_maxs)
-            param_dict[self.gwb_model.name] = gwb_params
-        else:
-            key = jr.split(key)[1]
-            spectral_params = jr.uniform(key=key,
-                                         shape=(self.spectral_model.nparams_base,),
-                                         minval=self.spectral_model.param_mins,
-                                         maxval=self.spectral_model.param_maxs)
-            param_dict[self.spectral_model.name] = spectral_params
+        # NumPyro adds a standard normal probability density for the line above
+        # this is not in the posterior, so we need to subtract it manually
+        numpyro.factor('ln_inverse_normal_correction', 0.5 * jnp.sum(z**2))
         
-        # deterministic parameters
-        if not self.det_model.null:
-            key = jr.split(key)[1]
-            det_params = jr.uniform(key=key,
-                                    shape=(self.det_model.nparams,),
-                                    minval=self.det_model.param_mins,
-                                    maxval=self.det_model.param_maxs)
-            param_dict[self.det_model.name] = det_params
+        # constants needed for likelihood evaluation
+        FNrs = self.data.FNrs
+        FNFs = self.data.FNFs
 
-            # pulsar parameters
-            if self.det_model.with_psr_params:
-                # pulsar phases
-                key = jr.split(key)[1]
-                psr_phases = jr.uniform(key=key,
-                                        shape=(self.npsrs,),
-                                        minval=jnp.zeros((self.npsrs,)),
-                                        maxval=jnp.ones((self.npsrs,)) * 2 * jnp.pi)
-                param_dict['psr_phases'] = psr_phases
-                # pulsar distances
-                key = jr.split(key)[1]
-                psr_dists_standard = jr.normal(key=key,
-                                               shape=(self.npsrs,))
-                psr_dists = (self.data.psr_dists_measured
-                             + self.data.psr_dists_std * psr_dists_standard)
-                param_dict['psr_dists'] = psr_dists
-        return param_dict
+        # prior covariance for pulsar noise coefficients (Np, 2Nf, 2Nf)
+        # TODO: replace with non-diagonal phi from window effects
+        psr_phi_diags = vmap(self.psr_model.get_phi_diag_func, in_axes=(0, None))(psr_params, self.data.freqs)
+        psr_phi = vmap(jnp.diag)(psr_phi_diags)
+        psr_phi_chol_factors = vmap(lambda x: jsl.cho_factor(x, lower=True))(psr_phi)
+        psr_phiinvs = vmap(lambda cf: jsl.cho_solve((cf[0], True),
+                                                jnp.identity(cf[0].shape[0])))(psr_phi_chol_factors)
+        psr_phi_ln_dets = vmap(lambda cf: 2 * jnp.sum(jnp.log(jnp.diag(cf[0]) / utils.renorm)))(psr_phi_chol_factors)
+
+        # posterior covariance for pulsar noise coefficients (Np, 2Nf, 2Nf)
+        psr_sigma_inv = FNFs + psr_phiinvs
+        psr_sigma_inv_chol_factors = vmap(lambda x: jsl.cho_factor(x, lower=True))(psr_sigma_inv)
+        psr_sigma_inv_ln_dets = vmap(lambda cf: 2 * jnp.sum(jnp.log(jnp.diag(cf[0]) / utils.renorm)))(psr_sigma_inv_chol_factors)
+
+        # additional terms needed for likelihood and standardizing transform
+        Linv_FNFs = vmap(lambda cf, FNF: jsl.solve_triangular(cf[0], FNF, lower=True))(psr_sigma_inv_chol_factors, FNFs)
+        Linv_FNrs = vmap(lambda cf, FNr: jsl.solve_triangular(cf[0], FNr, lower=True))(psr_sigma_inv_chol_factors, FNrs)
+        FNF_psr_sigma_FNFs = vmap(lambda A: A.T @ A)(Linv_FNFs)
+        rNF_psr_sigma_FNrs = vmap(lambda v: v.T @ v)(Linv_FNrs)
+        rNF_psr_sigma_FNFs = vmap(lambda v, A: v.T @ A)(Linv_FNrs, Linv_FNFs)
+
+        # covariance of GWB Fourier coefficients
+        # TODO: replace with non-diagonal phi from window effects
+        gwb_phi_spec_diag = self.gwb_model.get_phi_diag_func(gwb_params, self.data.freqs)   # (2 * Nf)
+        gwb_phi_spec = jnp.diag(gwb_phi_spec_diag)    # (2 * Nf, 2 * Nf)
+        gwb_phi_psr_corr = self.gwb_model.correlation_matrix    # (Np, Np)
+        # gwb_phi_inv_spec = jnp.linalg.inv(gwb_phi_spec)    # (2 * Nf, 2 * Nf)
+        gwb_phi_inv_spec = jnp.diag(1. / gwb_phi_spec_diag)
+        # gwb_phi_inv_psr_corr = jnp.linalg.inv(gwb_phi_psr_corr)    # (Np, Np)
+        gwb_phi_psr_corr_cho_factors = jsl.cho_factor(gwb_phi_psr_corr, lower=True)
+        gwb_phi_inv_psr_corr = jsl.cho_solve((gwb_phi_psr_corr_cho_factors[0], True),
+                                             jnp.identity(gwb_phi_psr_corr_cho_factors[0].shape[0]))
+        gwb_phi_inv = jnp.kron(gwb_phi_inv_psr_corr, gwb_phi_inv_spec)    # (Np * 2 * Nf, Np * 2 * Nf)
+        
+        # log-determinant of GWB covariance
+        gwb_phi_spec_lndet = 2 * jnp.sum(jnp.log(jnp.diag(jnp.linalg.cholesky(gwb_phi_spec)) / utils.renorm))
+        gwb_phi_psr_corr_lndet = 2 * jnp.sum(jnp.log(jnp.diag(jnp.linalg.cholesky(gwb_phi_psr_corr)) / utils.renorm))
+        gwb_phi_lndet = self.npsrs * gwb_phi_spec_lndet + self.ncomponents * gwb_phi_psr_corr_lndet
+
+        # do standardizing transform
+        gwb_sigma_inv = FNFs + gwb_phi_inv_spec[None, :, :] - FNF_psr_sigma_FNFs
+        Sigma_inv_L = vmap(lambda x: jsl.cholesky(x, lower=True))(gwb_sigma_inv)
+        y = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=0))(Sigma_inv_L, -FNrs + rNF_psr_sigma_FNFs)
+        a_hat = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=1))(Sigma_inv_L, y)
+        Lz = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=1))(Sigma_inv_L, z)
+        a_gwb = a_hat + Lz
+        numpyro.deterministic('a_gwb', a_gwb)
+
+        # ln-determinant Jacobian of standardizing transform
+        lndet_Jac = -jnp.sum(jnp.log(jnp.diagonal(Sigma_inv_L, axis1=1, axis2=2)))
+        numpyro.factor('ln_Jac', lndet_Jac)
+
+        # evaluate the likelihood
+        Ws = FNFs - FNF_psr_sigma_FNFs
+        Vs = -FNrs + rNF_psr_sigma_FNFs
+        ln_likelihood_val = -0.5 * jnp.sum(vmap(lambda a, W: jnp.dot(a, jnp.dot(W, a)))(a_gwb, Ws))
+        ln_likelihood_val += jnp.sum(vmap(lambda a, V: jnp.dot(a, V))(a_gwb, Vs))
+        ln_likelihood_val += 0.5 * jnp.sum(rNF_psr_sigma_FNrs)
+        ln_likelihood_val += -0.5 * jnp.sum(psr_phi_ln_dets) - 0.5 * jnp.sum(psr_sigma_inv_ln_dets)
+        numpyro.factor('lnlike', ln_likelihood_val)
+
+        # evaluate the prior
+        ln_prior_val = -0.5 * jnp.dot(a_gwb.flatten(), jnp.dot(gwb_phi_inv, a_gwb.flatten()))
+        ln_prior_val += -0.5 * gwb_phi_lndet
+        numpyro.factor('lnprior', ln_prior_val)    
+
 
