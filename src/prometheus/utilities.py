@@ -2,6 +2,8 @@
 
 import numpy as np
 import jax.numpy as jnp
+import jax.random as jr
+from numpyro import handlers
 from pyarrow import feather
 import pandas as pd
 
@@ -100,7 +102,7 @@ def save_chain(samples_dict, filepath='samples.feather', save_coeff_samples=Fals
 
     keys_to_skip = set()
     if not save_coeff_samples:
-        keys_to_skip = {'a', 'xi'}
+        keys_to_skip = {'z', 'a', 'xi'}
 
     flattened_dict = {}
     for key, val in samples_dict.items():
@@ -139,6 +141,36 @@ def load_chain(filepath):
     for key, value in records.items():
         samples[key] = restore_value(value)
     return samples
+
+
+
+def get_param_names(sampling_model):
+    """
+    Get the (sampled not observed) parameter names
+    from a NumPyro sampling model.
+
+    Parameters
+    ----------
+    sampling_model : Callable
+        A NumPyro sampling model
+
+    Returns
+    -------
+    param_names : list
+        A list of strings which are the names of the sampled
+        parameters in the probabilistic model.
+    """
+    
+    trace = handlers.trace(
+        handlers.seed(sampling_model, jr.PRNGKey(0))
+    ).get_trace()
+
+    param_names = [
+        name for name, site in trace.items()
+        if site["type"] == "sample" and not site.get("is_observed", False)
+    ]
+
+    return param_names
 
 
 def phitheta_to_psrpos(phi, theta):
