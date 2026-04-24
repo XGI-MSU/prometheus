@@ -4,8 +4,10 @@
 from jax import vmap
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
+import jax.random as jr
 import numpyro
 import numpyro.distributions as dist
+from numpyro import handlers
 from typing import Optional, Callable
 
 from .spectral_models import SpectralModel, IndependentSpectralModel, CommonSpectralModel
@@ -315,6 +317,44 @@ class PTAModel:
         # evaluate the prior
         ln_prior_val = -0.5 * jnp.dot(a_gwb.flatten(), jnp.dot(gwb_phi_inv, a_gwb.flatten()))
         ln_prior_val += -0.5 * gwb_phi_lndet
-        numpyro.factor('lnprior', ln_prior_val)    
+        numpyro.factor('lnprior', ln_prior_val)
+
+
+    def get_param_names_and_shapes(self, alt_model=None):
+        """
+        Get the (sampled not observed) parameter names
+        and shapes from a NumPyro sampling model.
+
+        Parameters
+        ----------
+        alt_model : Callable
+            Alternative NumPyro sampling model to get parameter names
+            and shapes from. Defaults to None in which case the
+            self.sampling_model is used.
+
+        Returns
+        -------
+        shapes : dict
+            A dictionary with parameter names as keys and corresponding
+            shapes as keys.
+        """
+        
+        if alt_model is None:
+            sampling_model = self.sampling_model
+        else:
+            sampling_model = alt_model
+        
+        trace = handlers.trace(
+            handlers.seed(sampling_model, jr.PRNGKey(0))
+        ).get_trace()
+
+        shapes = {
+            name: site["value"].shape
+            for name, site in trace.items()
+            if site["type"] == "sample" and not site.get("is_observed", False)
+            }
+        
+        return shapes
+
 
 
