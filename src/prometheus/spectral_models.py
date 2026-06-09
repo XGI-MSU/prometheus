@@ -4,6 +4,7 @@ Holds classes for stochastic Gaussian spectral models.
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsl
 import numpy as np
 from typing import Callable, Optional
 
@@ -121,20 +122,21 @@ class IndependentSpectralModel(SpectralModel):
                  name : str,
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
-                 get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+                 get_phi_diag_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
+                 get_phi_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
                  additional_ln_factor : Optional[Callable] = None
                  ):
         
         self.get_phi_diag_func = get_phi_diag_func
+        self.get_phi_func = get_phi_func
         self.additional_ln_factor = additional_ln_factor
 
-        # vectorize spectral model over all pulsars
-        # so each pulsar gets an identical independent model
-        vectorized_diag = jax.vmap(
-            get_phi_diag_func,
-            in_axes=(0, None),
-        )
+        if self.get_phi_diag_func is None and self.get_phi_func is None:
+            raise ValueError('Either a get_phi_diag_func or get_phi_func must be provided.')
+        if self.get_phi_diag_func is not None and self.get_phi_func is not None:
+            raise ValueError('Only one of get_phi_diag_func or get_phi_func may be provided.')
 
+        
         def get_phi_cube_func(params, freqs):
             """
             Gets the prior covariance matrix for the Fourier coefficients
@@ -157,7 +159,7 @@ class IndependentSpectralModel(SpectralModel):
                 the (i, j, k) element is the covariance of the ith Fourier coefficient
                 between pulsars j and k. The covariance should use units of [ns]^2.
             """
-            phi_diags = vectorized_diag(params, freqs).T
+            phi_diags = jax.vmap(get_phi_diag_func, in_axes=(0, None))(params, freqs).T
             nfreqs2, npsrs = phi_diags.shape
             phi_cube = jnp.zeros((nfreqs2, npsrs, npsrs))
             ii = jnp.arange(npsrs)
@@ -216,19 +218,31 @@ class CommonSpectralModel(SpectralModel):
                  name : str,
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
-                 get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
                  correlation_matrix : str | np.ndarray | jnp.ndarray,
+                 get_phi_diag_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
+                 get_phi_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
                  nfreqs : Optional[int] = None,
                  additional_ln_factor : Optional[Callable] = None):
         self.data = data
         self.get_phi_diag_func = get_phi_diag_func
+        self.get_phi_func = get_phi_func
         self.nfreqs = nfreqs or data.nfreqs
         self.additional_ln_factor = additional_ln_factor
+
+        if self.get_phi_diag_func is None and self.get_phi_func is None:
+            raise ValueError('Either a get_phi_diag_func or get_phi_func must be provided.')
+        if self.get_phi_diag_func is not None and self.get_phi_func is not None:
+            raise ValueError('Only one of get_phi_diag_func or get_phi_func may be provided.')
 
         # zeros to append to spectrum if user requests
         # fewer frequency bins than in data object
         self.zeros = jnp.zeros(2 * (self.data.nfreqs - self.nfreqs))
+        self.block_zeros = jnp.zeros((self.zeros.shape[0], self.zeros.shape[0]))
         self.num_coeffs = 2 * self.nfreqs
+
+        # zero out the higher frequency components of get_phi_func if specified by the user
+        if self.get_phi_func is not None and self.nfreqs != self.data.nfreqs:
+            raise ValueError(f'''When a get_phi_func is provided, nfreqs must match that of the data object. Set nfreqs={self.data.nfreqs}.''')
 
         # if 'HD' or 'CURN', build correlation matrix for user
         if isinstance(correlation_matrix, str):
@@ -236,6 +250,10 @@ class CommonSpectralModel(SpectralModel):
                 correlation_matrix, data
             )
         self.correlation_matrix = jnp.array(correlation_matrix)
+        corr_cho_factors = jsl.cho_factor(self.correlation_matrix, lower=True)
+        self.inv_correlation_matrix = jsl.cho_solve((corr_cho_factors[0], True),
+                                             jnp.identity(corr_cho_factors[0].shape[0]))
+        self.lndet_correlation_matrix = 2 * jnp.sum(jnp.log(jnp.diag(jnp.linalg.cholesky(self.correlation_matrix))))
 
         def get_phi_cube_func(params, freqs):
             """
@@ -271,4 +289,5 @@ class CommonSpectralModel(SpectralModel):
             get_phi_cube_func=get_phi_cube_func,
             additional_ln_factor=additional_ln_factor,
         )
+
 

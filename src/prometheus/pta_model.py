@@ -254,13 +254,9 @@ class PTAModel:
         FNFs = self.data.FNFs
 
         # prior covariance for pulsar noise coefficients (Np, 2Nf, 2Nf)
-        # TODO: replace with non-diagonal phi from window effects
-        psr_phi_diags = vmap(self.psr_model.get_phi_diag_func, in_axes=(0, None))(psr_params, self.data.freqs)
-        psr_phi = vmap(jnp.diag)(psr_phi_diags)
-        psr_phi_chol_factors = vmap(lambda x: jsl.cho_factor(x, lower=True))(psr_phi)
-        psr_phiinvs = vmap(lambda cf: jsl.cho_solve((cf[0], True),
-                                                jnp.identity(cf[0].shape[0])))(psr_phi_chol_factors)
-        psr_phi_ln_dets = vmap(lambda cf: 2 * jnp.sum(jnp.log(jnp.diag(cf[0]) / utils.renorm)))(psr_phi_chol_factors)
+        # psr_phi = self.psr_model.get_freq_corr_phi_cube(psr_params, self.data.freqs)
+        psr_phi = vmap(self.psr_model.get_phi_func, in_axes=(0, None))(psr_params, self.data.freqs)
+        _, psr_phiinvs, psr_phi_ln_dets = posterior.cholesky_inverse_det_phi(psr_phi)
 
         # posterior covariance for pulsar noise coefficients (Np, 2Nf, 2Nf)
         psr_sigma_inv = FNFs + psr_phiinvs
@@ -275,22 +271,13 @@ class PTAModel:
         rNF_psr_sigma_FNFs = vmap(lambda v, A: v.T @ A)(Linv_FNrs, Linv_FNFs)
 
         # covariance of GWB Fourier coefficients
-        # TODO: replace with non-diagonal phi from window effects
-        gwb_phi_spec_diag = self.gwb_model.get_phi_diag_func(gwb_params, self.data.freqs)   # (2 * Nf)
-        gwb_phi_spec = jnp.diag(gwb_phi_spec_diag)    # (2 * Nf, 2 * Nf)
-        gwb_phi_psr_corr = self.gwb_model.correlation_matrix    # (Np, Np)
-        # gwb_phi_inv_spec = jnp.linalg.inv(gwb_phi_spec)    # (2 * Nf, 2 * Nf)
-        gwb_phi_inv_spec = jnp.diag(1. / gwb_phi_spec_diag)
-        # gwb_phi_inv_psr_corr = jnp.linalg.inv(gwb_phi_psr_corr)    # (Np, Np)
-        gwb_phi_psr_corr_cho_factors = jsl.cho_factor(gwb_phi_psr_corr, lower=True)
-        gwb_phi_inv_psr_corr = jsl.cho_solve((gwb_phi_psr_corr_cho_factors[0], True),
-                                             jnp.identity(gwb_phi_psr_corr_cho_factors[0].shape[0]))
-        gwb_phi_inv = jnp.kron(gwb_phi_inv_psr_corr, gwb_phi_inv_spec)    # (Np * 2 * Nf, Np * 2 * Nf)
-        
-        # log-determinant of GWB covariance
+        gwb_phi_spec = self.gwb_model.get_phi_func(gwb_params, self.data.freqs)
+        gwb_phi_spec_cho_factors = jsl.cho_factor(gwb_phi_spec, lower=True)
+        gwb_phi_inv_spec = jsl.cho_solve((gwb_phi_spec_cho_factors[0], True),
+                                             jnp.identity(gwb_phi_spec_cho_factors[0].shape[0]))
         gwb_phi_spec_lndet = 2 * jnp.sum(jnp.log(jnp.diag(jnp.linalg.cholesky(gwb_phi_spec)) / utils.renorm))
-        gwb_phi_psr_corr_lndet = 2 * jnp.sum(jnp.log(jnp.diag(jnp.linalg.cholesky(gwb_phi_psr_corr)) / utils.renorm))
-        gwb_phi_lndet = self.npsrs * gwb_phi_spec_lndet + self.ncomponents * gwb_phi_psr_corr_lndet
+        gwb_phi_inv = jnp.kron(self.gwb_model.inv_correlation_matrix, gwb_phi_inv_spec)    # (Np * 2 * Nf, Np * 2 * Nf)
+        gwb_phi_lndet = self.npsrs * gwb_phi_spec_lndet + self.ncomponents * self.gwb_model.lndet_correlation_matrix
 
         # do standardizing transform
         gwb_sigma_inv = FNFs + gwb_phi_inv_spec[None, :, :] - FNF_psr_sigma_FNFs

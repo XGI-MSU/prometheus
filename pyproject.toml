@@ -13,6 +13,7 @@ dependencies = [
     "pyarrow",
     "tqdm",
     "enterprise-pulsar",
+    "iris @ git+https://github.com/aiden-g12321/iris.git",
 ]
 
 [tool.setuptools]

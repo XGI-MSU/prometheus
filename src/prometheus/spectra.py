@@ -74,8 +74,8 @@ def power_law_flat_tail(spectral_parameters, freqs):
     log10_A, gamma, log10_kappa = spectral_parameters
 
     # power law spectrum
-    log10_phi_diag_power_law = power_law(jnp.array([log10_A, gamma]), freqs)
-    
+    log10_phi_diag_power_law = jnp.log10(power_law(jnp.array([log10_A, gamma]), freqs))
+        
     # flat tail spectrum
     log10_phi_diag_flat = 2 * utils.log10_renorm + 2 * log10_kappa
 

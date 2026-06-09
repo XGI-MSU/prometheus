@@ -111,7 +111,7 @@ class DeterministicModel:
         """
         
         # get timing delays induced by the deterministic signal over "sparse" (evenly-spaced) TOAs
-        det_residuals = self.get_delays_func(self.data.sparse_toas_det, self.data.psrpos,
+        det_residuals = self.get_delays_func(self.data.sparse_toas_shifted_scaled, self.data.psrpos,
                                                     det_params, psr_phases, psr_dists)
         # window residuals over extended observation
         det_residuals_windowed = self.data.Tukey_det * det_residuals
@@ -119,7 +119,7 @@ class DeterministicModel:
         det_fft = jnp.fft.fft(det_residuals_windowed, n=None, axis=-1, norm=None)  # dim (Np, 2 * Nf + 2)
     
         # apply time shift to set initial time
-        det_fft *= jnp.exp(-1.j * 2 * jnp.pi * self.data.freqs_forFFT * self.data.sparse_toas_det[:, 0:1])
+        det_fft *= jnp.exp(-1.j * 2 * jnp.pi * self.data.freqs_forFFT * self.data.sparse_toas_det_jax[:, 0:1])
         
         # extract sine and cosine coefficients
         a_n = jnp.imag(det_fft[:, :self.data.Nsparse // 2]) * (-2 / self.data.Nsparse)  # (Np, Nf + 1)

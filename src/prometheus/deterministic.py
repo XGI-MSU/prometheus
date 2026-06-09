@@ -54,311 +54,6 @@ def get_psr_phase(cw_source_params, psr_position, psr_dist):
     return psr_phase
 
 
-def cw_delay_evolve_low_freq_float32(toas, psr_pos, source_params, psr_phases, psr_dists):
-    """
-    Get the delays across pulsars induced by an evolving continuous gravitational
-    wave from an individual supermassive black hole binary (including pulsar term)
-    as in Ellis et. al 2012, 2013. This function IS float32 compatible. This function
-    is only accurate for low CW frequencies: (log10_f < -8.2).
-    
-    Parameters
-    ----------
-    toas : array
-        (npsrs, ntoas) shaped array where npsrs and ntoas are the number of pulsars
-        and number of toas per pulsar respectively. Note these 'toas' need not be
-        the actual observed TOAs of the array, and in implementation they are not.
-        In deterministic models, the TOAs are a set of evenly spaced uniform TOAs
-        used in the FFT. Then the Fourier design matrix maps the output of the
-        FFT to the actual observed TOAs.
-    psr_pos : array
-        (npsrs, 3) shaped array where npsrs is the number of pulsars in the array.
-        These are the Cartesian unit vectors pointing to each pulsar.
-    source_params : array
-        Array of shape (8,) storing parameters of the CW source. We use the ordering:
-        log10(chirp mass [solar mass]), log10(frequency [Hz]), cosine(inclination angle),
-        polarization angle, log10(characteristic strain), cosine(polar angle of sky location),
-        azimuthal angle of sky location, initial phase.
-    psr_phases : array
-        Array of shape (npsrs,) where npsrs is the number of pulsars in the array.
-        The array stores the phase of the CW at each pulsar.
-    psr_dists : array
-        Array of shape (npsrs,) where npsrs is the number of pulsars in the array.
-        The array stores the distance to each pulsar [kpc].
-
-    Returns
-    -------
-    res : array
-        Array of same shape as 'toas' input. These are the delays in the timing residuals
-        induced by the continuous wave in units of [ns].
-    """
-    # unpack parameters
-    log10_mc, log10_fgw, cos_inc, psi, log10_h, cos_gwtheta, gwphi, phase0 = source_params
-    p_phases = psr_phases[:, None]
-    pdists = psr_dists
-
-    # convert units to time [sec * cw_renorm]
-    mc = 10 ** log10_mc * utils.Tsun * utils.cw_renorm
-    fgw = 10 ** log10_fgw / utils.cw_renorm
-    gwtheta = jnp.arccos(cos_gwtheta)
-    inc = jnp.arccos(cos_inc)
-    p_dists = (pdists * utils.kpc / utils.c * utils.cw_renorm)
-    dist = 2 * mc ** (5 / 3) * (jnp.pi * fgw) ** (2 / 3) / 10**log10_h * utils.cw_renorm
-
-    # get antenna pattern funcs and cosMu
-    # write function to get pos from theta,phi
-    fplus, fcross, cosMu = utils.create_gw_antenna_pattern(gwtheta, gwphi, psr_pos)
-
-    # get pulsar time
-    toas_copy = (toas - utils.tref) * utils.cw_renorm
-    L1minCosmu = (p_dists * (1 - cosMu))[:, None]
-    tp = toas_copy - L1minCosmu
-
-    # orbital frequency
-    w0 = jnp.pi * fgw
-    phase0 = phase0 / 2.0  # convert GW to orbital phase
-
-    # calculate time dependent frequency at earth and pulsar
-    mc53 = mc**(5./3.)
-    w083 = w0**(8./3.)
-    fac1 = 256./5. * mc53 * w083
-
-    # calculate time dependent phase
-    phase = phase0 + w0 * toas_copy + 3./16. * w0 * fac1 * toas_copy**2 + 11./128.*toas_copy**3*w0*fac1**2
-    phase_p = (phase0 + p_phases + w0 * (tp + L1minCosmu)
-               + -3./16. * w0 * fac1 * (L1minCosmu**2 - tp**2)
-               + 11./128.*w0*fac1**2*(L1minCosmu**3+tp**3))
-
-    # define time dependent coefficients
-    inc_factor = -0.5 * (3. + jnp.cos(2. * inc))
-    At = jnp.sin(2. * phase) * inc_factor
-    Bt = 2. * jnp.cos(2. * phase) * cos_inc
-    At_p = jnp.sin(2. * phase_p) * inc_factor
-    Bt_p = 2. * jnp.cos(2. * phase_p) * cos_inc
-
-    # now define time dependent amplitudes
-    alpha = mc53 / (dist * w0**(1./3.)) * (1 - 1./8.*fac1*toas_copy-7./128.*fac1**2*toas_copy**2)
-    alpha_p = mc53 / (dist * w0**(1./3.)) * (1 - 1./8.*fac1*tp-7./128.*fac1**2*tp**2)
-
-    # define rplus and rcross
-    c2psi = jnp.cos(2. * psi)
-    s2psi = jnp.sin(2. * psi)
-    rplus = alpha*(-At*c2psi+Bt*s2psi)
-    rcross = alpha*(At*s2psi+Bt*c2psi)
-    rplus_p = alpha_p*(-At_p*c2psi+Bt_p*s2psi)
-    rcross_p = alpha_p*(At_p*s2psi+Bt_p*c2psi)
-
-    # residuals
-    res = fplus[:, None] * (rplus_p - rplus) + fcross[:, None] * (rcross_p - rcross)
-    return res * utils.renorm  # (Np, Nsparse)
-
-
-def cw_delay_evolve_float32_TESTING(toas, psr_pos, source_params, psr_phases, psr_dists):
-    
-    """
-    Get the delays across pulsars induced by an evolving continuous gravitational
-    wave from an individual supermassive black hole binary (including pulsar term)
-    as in Ellis et. al 2012, 2013. This function IS float32 compatible.
-
-    This function is in TESTING. It's purpose is to work better in float32 precision
-    at high frequencies.
-    
-    Parameters
-    ----------
-    toas : array
-        (npsrs, ntoas) shaped array where npsrs and ntoas are the number of pulsars
-        and number of toas per pulsar respectively. Note these 'toas' need not be
-        the actual observed TOAs of the array, and in implementation they are not.
-        In deterministic models, the TOAs are a set of evenly spaced uniform TOAs
-        used in the FFT. Then the Fourier design matrix maps the output of the
-        FFT to the actual observed TOAs.
-    psr_pos : array
-        (npsrs, 3) shaped array where npsrs is the number of pulsars in the array.
-        These are the Cartesian unit vectors pointing to each pulsar.
-    source_params : array
-        Array of shape (8,) storing parameters of the CW source. We use the ordering:
-        log10(chirp mass [solar mass]), log10(frequency [Hz]), cosine(inclination angle),
-        polarization angle, log10(characteristic strain), cosine(polar angle of sky location),
-        azimuthal angle of sky location, initial phase.
-    psr_phases : array
-        Array of shape (npsrs,) where npsrs is the number of pulsars in the array.
-        The array stores the phase of the CW at each pulsar.
-    psr_dists : array
-        Array of shape (npsrs,) where npsrs is the number of pulsars in the array.
-        The array stores the distance to each pulsar [kpc].
-
-    Returns
-    -------
-    res : array
-        Array of same shape as 'toas' input. These are the delays in the timing residuals
-        induced by the continuous wave in units of [ns].
-    """
-    # unpack parameters
-    log10_mc, log10_fgw, cos_inc, psi, log10_h, cos_gwtheta, gwphi, phase0 = source_params
-    p_phases = psr_phases[:, None]
-
-    # convert units
-    mc = 10.0 ** log10_mc * utils.Tsun * utils.cw_renorm
-    fgw = 10.0 ** log10_fgw / utils.cw_renorm
-    w0 = jnp.pi * fgw
-
-    gwtheta = jnp.arccos(cos_gwtheta)
-    inc = jnp.arccos(cos_inc)
-
-    p_dists = psr_dists * utils.kpc / utils.c * utils.cw_renorm
-    dist = 2.0 * mc ** (5.0 / 3.0) * (jnp.pi * fgw) ** (2.0 / 3.0) / 10.0 ** log10_h
-
-    # antenna patterns
-    fplus, fcross, cosMu = utils.create_gw_antenna_pattern(gwtheta, gwphi, psr_pos)
-
-    # times
-    toas_copy = (toas - utils.tref) * utils.cw_renorm
-    L1minCosmu = (p_dists * (1.0 - cosMu))[:, None]
-    tp = toas_copy - L1minCosmu
-
-    # constants
-    phase0 = phase0 / 2.0
-    mc53 = mc ** (5.0 / 3.0)
-    w083 = w0 ** (8.0 / 3.0)
-    fac1 = 256.0 / 5.0 * mc53 * w083
-
-    # regime flags (scalar!)
-    earth_use_exp = fac1 * jnp.max(toas_copy[:, -1]) < 0.1
-    pulsar_use_exp = fac1 * jnp.maximum(
-        tp[:, -1], p_dists * (1.0 - cosMu)
-    ).max() < 0.1
-    pulsar_amp_use_exp = fac1 * jnp.max(jnp.abs(tp[:, -1])) < 0.1
-
-    # ----------------------
-    # Earth phase
-    # ----------------------
-    def earth_phase_exp(_):
-        x = fac1 * toas_copy
-        return phase0 + w0 / fac1 * (
-            x
-            + 3/16 * x**2
-            + 11/128 * x**3
-            + 209/4096 * x**4
-            + 5643/163840 * x**5
-        )
-
-    def earth_phase_orig(_):
-        omega = w0 * (1.0 - fac1 * toas_copy) ** (-3.0 / 8.0)
-        return phase0 + 1.0 / (32.0 * mc53) * (
-            w0 ** (-5.0 / 3.0) - omega ** (-5.0 / 3.0)
-        )
-
-    phase = lax.cond(earth_use_exp, earth_phase_exp, earth_phase_orig, None)
-
-    # ----------------------
-    # Pulsar phase
-    # ----------------------
-    def pulsar_phase_exp(_):
-        xL = fac1 * L1minCosmu
-        xt = fac1 * tp
-        return (
-            phase0
-            + p_phases
-            + 8 * w0 / (5 * fac1) * (
-                5/8 * xL + 5/8 * xt
-                - 15/128 * xL**2 + 15/128 * xt**2
-                + 55/1024 * xL**3 + 55/1024 * xt**3
-                - 1045/32768 * xL**4 + 1045/32768 * xt**4
-                + 5643/262144 * xL**5 + 5643/262144 * xt**5
-            )
-        )
-
-    def pulsar_phase_orig(_):
-        omega_p = w0 * (1.0 - fac1 * tp) ** (-3.0 / 8.0)
-        omega_p0 = (
-            w0 * (1.0 + fac1 * p_dists * (1.0 - cosMu)) ** (-3.0 / 8.0)
-        )[:, None]
-        return (
-            phase0
-            + p_phases
-            + 1.0 / (32.0 * mc53)
-            * (omega_p0 ** (-5.0 / 3.0) - omega_p ** (-5.0 / 3.0))
-        )
-
-    phase_p = lax.cond(pulsar_use_exp, pulsar_phase_exp, pulsar_phase_orig, None)
-
-    # ----------------------
-    # Earth amplitude
-    # ----------------------
-    def earth_alpha_exp(_):
-        x = fac1 * toas_copy
-        return (
-            mc53
-            / (dist * w0 ** (1.0 / 3.0))
-            * (
-                1
-                - 1/8 * x
-                - 7/128 * x**2
-                - 35/1024 * x**3
-                - 805/32768 * x**4
-                - 4991/262144 * x**5
-            )
-            / utils.cw_renorm
-        )
-
-    def earth_alpha_orig(_):
-        omega = w0 * (1.0 - fac1 * toas_copy) ** (-3.0 / 8.0)
-        return mc53 / (dist * omega ** (1.0 / 3.0)) / utils.cw_renorm
-
-    alpha = lax.cond(earth_use_exp, earth_alpha_exp, earth_alpha_orig, None)
-
-    # ----------------------
-    # Pulsar amplitude
-    # ----------------------
-    def pulsar_alpha_exp(_):
-        x = fac1 * tp
-        return (
-            mc53
-            / (dist * w0 ** (1.0 / 3.0))
-            * (
-                1
-                - 1/8 * x
-                - 7/128 * x**2
-                - 35/1024 * x**3
-                - 805/32768 * x**4
-                - 4991/262144 * x**5
-            )
-            / utils.cw_renorm
-        )
-
-    def pulsar_alpha_orig(_):
-        omega_p = w0 * (1.0 - fac1 * tp) ** (-3.0 / 8.0)
-        return mc53 / (dist * omega_p ** (1.0 / 3.0)) / utils.cw_renorm
-
-    alpha_p = lax.cond(
-        pulsar_amp_use_exp, pulsar_alpha_exp, pulsar_alpha_orig, None
-    )
-
-    # ----------------------
-    # Residuals
-    # ----------------------
-    inc_factor = -0.5 * (3.0 + jnp.cos(2.0 * inc))
-
-    At = jnp.sin(2.0 * phase) * inc_factor
-    Bt = 2.0 * jnp.cos(2.0 * phase) * cos_inc
-    At_p = jnp.sin(2.0 * phase_p) * inc_factor
-    Bt_p = 2.0 * jnp.cos(2.0 * phase_p) * cos_inc
-
-    c2psi = jnp.cos(2.0 * psi)
-    s2psi = jnp.sin(2.0 * psi)
-
-    rplus = alpha * (-At * c2psi + Bt * s2psi)
-    rcross = alpha * (At * s2psi + Bt * c2psi)
-    rplus_p = alpha_p * (-At_p * c2psi + Bt_p * s2psi)
-    rcross_p = alpha_p * (At_p * s2psi + Bt_p * c2psi)
-
-    res = (
-        fplus[:, None] * (rplus_p - rplus)
-        + fcross[:, None] * (rcross_p - rcross)
-    )
-
-    return res * utils.renorm
-
-
 def cw_delay_evolve_float64(toas, psr_pos, source_params, psr_phases, psr_dists):
     """
     Get the delays across pulsars induced by an evolving continuous gravitational
@@ -457,4 +152,340 @@ def cw_delay_evolve_float64(toas, psr_pos, source_params, psr_phases, psr_dists)
     # residuals
     res = fplus[:, None] * (rplus_p - rplus) + fcross[:, None] * (rcross_p - rcross)
     return res * utils.renorm   # (Np, Nsparse)
+
+
+def cw_delay_full_prior_float32(toas_shifted_scaled, psr_pos, source_params, psr_phases, psr_dists):
+    """
+    Get the CW timing delays in float32 across the extended parameter prior:
+        log10_mc  in [7, 10],  log10_fgw in [-9, -7].
+
+    Compared to ``cw_delay_evolve_float32`` (which uses a 5th-order Taylor
+    series valid for |fac1*t| << 1), this function handles the full prior
+    including regimes where fac1*t ~ O(1) (high frequency / high mass).
+
+    Numerical strategy
+    ------------------
+    The same three cancellation hazards from ``cw_delay_evolve_float32`` apply
+    here (see that docstring), plus one new complication:
+
+    4. Large-argument failure of the Taylor series: for log10_fgw > -8.2 or
+       log10_mc > 9, ``fac1 * t`` can exceed 0.1, invalidating the Taylor
+       approximation.  Fix: use element-wise ``jnp.where`` to switch to the
+       exact formulas
+
+          earth phase:   8/5 * phase_prefac * [1 - (1-x_e)^{5/8}]
+          pulsar phase:  8/5 * phase_prefac * A^{5/8} * [1 - (1-beta)^{5/8}]
+
+       where  A = 1 + xL = 1 + fac1*L*(1-cosMu)  and  beta = xs/A  (both
+       free of cancellation).  For small x_e or beta (< 0.1) the same
+       expression is evaluated via its 5-term Taylor series in the small
+       argument; for larger values the exact pow() is used directly.
+       The crossover at 0.1 keeps the Taylor error below float32 machine
+       epsilon (~1.2e-7) while the exact branch has no cancellation for
+       arguments >= 0.1.
+
+    5. Amplitudes: the Taylor series for (1-x)^{1/8} is replaced with the
+       exact expression throughout, since (1-x)^{1/8} has no cancellation for
+       0 <= x < 1.
+
+    Binary mergers (fac1*t > 1) produce NaN, consistent with the float64
+    reference function.
+
+    Parameters
+    ----------
+    toas : array
+        (npsrs, ntoas) shaped array. Raw TOAs in seconds; the tref shift is
+        computed internally in the input dtype before casting to float32.
+    psr_pos : array
+        (npsrs, 3) shaped array of Cartesian unit vectors to each pulsar.
+    source_params : array
+        Shape (8,): log10(Mc/Msun), log10(fgw/Hz), cos(inc), psi,
+        log10(h), cos(gwtheta), gwphi, phase0.
+    psr_phases : array
+        Shape (npsrs,). CW phase at each pulsar.
+    psr_dists : array
+        Shape (npsrs,). Distance to each pulsar [kpc].
+
+    Returns
+    -------
+    res : array
+        Shape (npsrs, ntoas). Timing delays in nanoseconds [ns].
+        NaN where the binary has merged (fac1*t > 1).
+    """
+    f32 = jnp.float32
+
+
+    psr_pos       = jnp.asarray(psr_pos,       dtype=jnp.float32)
+    source_params = jnp.asarray(source_params,  dtype=jnp.float32)
+    psr_phases    = jnp.asarray(psr_phases,    dtype=jnp.float32)
+    psr_dists     = jnp.asarray(psr_dists,     dtype=jnp.float32)
+
+    # --- unpack
+    log10_mc, log10_fgw, cos_inc, psi, log10_h, cos_gwtheta, gwphi, phase0 = source_params
+    p_phases = psr_phases[:, None]
+
+    # --- unit conversion (cw_renorm scaling)
+    mc  = f32(10.0) ** log10_mc * f32(utils.Tsun * utils.cw_renorm)
+    fgw = f32(10.0) ** log10_fgw / f32(utils.cw_renorm)
+    w0  = f32(jnp.pi) * fgw
+
+    gwtheta = jnp.arccos(cos_gwtheta)
+    inc     = jnp.arccos(cos_inc)
+
+    p_dists = psr_dists * f32(utils.kpc / utils.c * utils.cw_renorm)
+    dist    = f32(2.0) * mc ** f32(5.0 / 3.0) * (f32(jnp.pi) * fgw) ** f32(2.0 / 3.0) / f32(10.0) ** log10_h
+
+    # --- antenna pattern + geometry
+    fplus, fcross, cosMu = utils.create_gw_antenna_pattern(gwtheta, gwphi, psr_pos)
+
+    L1minCosmu = (p_dists * (f32(1.0) - cosMu))[:, None]   # (npsrs, 1)
+
+    # --- shared constants
+    phase0_orb = phase0 / f32(2.0)
+    mc53       = mc ** f32(5.0 / 3.0)
+    fac1       = f32(256.0 / 5.0) * mc53 * w0 ** f32(8.0 / 3.0)
+    phase_prefac = w0 / fac1
+    amp_prefac   = mc53 / (dist * w0 ** f32(1.0 / 3.0)) / f32(utils.cw_renorm)
+
+    # xs = fac1 * toas_copy  (small variable, no cancellation)
+    # xL = fac1 * L1minCosmu (pulsar distance variable, can be large)
+    xs = fac1 * toas_shifted_scaled        # (npsrs, ntoas)
+    xL = fac1 * L1minCosmu       # (npsrs, 1)
+
+    THRESH = f32(0.1)
+
+    # -----------------------------------------------------------------------
+    # Earth phase
+    #   exact:  8/5 * phase_prefac * [1 - (1-xs)^{5/8}]
+    #   Taylor: phase_prefac * (xs + 3/16*xs^2 + ...)    — valid for xs << 1
+    # -----------------------------------------------------------------------
+    earth_exact  = f32(8.0 / 5.0) * phase_prefac * (f32(1.0) - (f32(1.0) - xs) ** f32(5.0 / 8.0))
+    earth_taylor = phase_prefac * (xs
+                                   + f32(3.0 / 16.0)     * xs ** 2
+                                   + f32(11.0 / 128.0)   * xs ** 3
+                                   + f32(209.0 / 4096.0) * xs ** 4
+                                   + f32(5643.0 / 163840.0) * xs ** 5)
+    phase = phase0_orb + jnp.where(xs < THRESH, earth_taylor, earth_exact)
+
+    # -----------------------------------------------------------------------
+    # Earth amplitude  — exact (1-xs)^{1/8}, no cancellation
+    # -----------------------------------------------------------------------
+    alpha = amp_prefac * (f32(1.0) - xs) ** f32(1.0 / 8.0)
+
+    # -----------------------------------------------------------------------
+    # Pulsar phase
+    #   A    = 1 + xL           (always >= 1, no cancellation)
+    #   beta = xs / A           (small when xs << A; key: avoids xL+xt subtraction)
+    #
+    #   exact:  8/5 * phase_prefac * A^{5/8} * [1 - (1-beta)^{5/8}]
+    #   Taylor: same with 5-term series in beta          — valid for beta << 1
+    #
+    # This formulation is equivalent to the float64 formula:
+    #   1/(32*mc53) * (omega_p0^{-5/3} - omega_p^{-5/3})
+    # and is free of cancellation for any xL >= 0.
+    # -----------------------------------------------------------------------
+    A    = f32(1.0) + xL            # (npsrs, 1)
+    beta = xs / A                   # (npsrs, ntoas)
+
+    A58  = A ** f32(5.0 / 8.0)
+    psr_exact  = f32(8.0 / 5.0) * phase_prefac * A58 * (f32(1.0) - (f32(1.0) - beta) ** f32(5.0 / 8.0))
+    psr_taylor = f32(8.0 / 5.0) * phase_prefac * A58 * (
+        f32(5.0 / 8.0)        * beta
+        + f32(15.0 / 128.0)   * beta ** 2
+        + f32(55.0 / 1024.0)  * beta ** 3
+        + f32(1045.0 / 32768.0)  * beta ** 4
+        + f32(5643.0 / 262144.0) * beta ** 5)
+
+    phase_p = phase0_orb + p_phases + jnp.where(beta < THRESH, psr_taylor, psr_exact)
+
+    # -----------------------------------------------------------------------
+    # Pulsar amplitude  — exact (A - xs)^{1/8} = (1 + xL - xs)^{1/8}
+    # -----------------------------------------------------------------------
+    alpha_p = amp_prefac * (A - xs) ** f32(1.0 / 8.0)
+
+    # --- waveform coefficients
+    inc_factor = f32(-0.5) * (f32(3.0) + jnp.cos(f32(2.0) * inc))
+    At   = jnp.sin(f32(2.0) * phase)   * inc_factor
+    Bt   = f32(2.0) * jnp.cos(f32(2.0) * phase)   * cos_inc
+    At_p = jnp.sin(f32(2.0) * phase_p) * inc_factor
+    Bt_p = f32(2.0) * jnp.cos(f32(2.0) * phase_p) * cos_inc
+
+    c2psi = jnp.cos(f32(2.0) * psi)
+    s2psi = jnp.sin(f32(2.0) * psi)
+
+    rplus    = alpha   * (-At   * c2psi + Bt   * s2psi)
+    rcross   = alpha   * ( At   * s2psi + Bt   * c2psi)
+    rplus_p  = alpha_p * (-At_p * c2psi + Bt_p * s2psi)
+    rcross_p = alpha_p * ( At_p * s2psi + Bt_p * c2psi)
+
+    res = fplus[:, None] * (rplus_p - rplus) + fcross[:, None] * (rcross_p - rcross)
+    return res * f32(utils.renorm)
+
+
+def cw_delay_evolve_float32(toas_shifted_scaled, psr_pos, source_params, psr_phases, psr_dists):
+    """
+    Get the delays across pulsars induced by an evolving continuous gravitational
+    wave from an individual supermassive black hole binary (including pulsar term)
+    as in Ellis et. al 2012, 2013. This function is float32 compatible.
+
+    Numerical strategy
+    ------------------
+    Three sources of catastrophic cancellation prevent a naive port of the
+    float64 function from working in float32:
+
+    1. TOA subtraction: raw TOAs (~5e9 s) and tref share ~2 leading digits, so
+       ``toas - tref`` loses ~1 ULP of float32 precision.  Fix: input the
+       shifted, scaled time ``(toas - tref) * cw_renorm``.
+
+    2. Small-argument cancellation in frequency evolution: ``omega / w0 - 1`` and
+       ``omega^{-5/3} - w0^{-5/3}`` are O(fac1 * t) ~ 1e-4 for the intended
+       parameter range, so a direct evaluation loses ~4 float32 digits.  Fix:
+       Taylor-expand phase and amplitude to fifth order in x = fac1 * t.
+       Convergence is guaranteed for |x| < 1; for the stated parameter range the
+       worst case is |x| ~ 0.22 and the truncation error is below float32
+       machine epsilon.
+
+    3. Pulsar-phase sum terms: the pulsar retarded time is
+       ``tp = toas_copy - L1minCosmu``.  For distant pulsars L1minCosmu (~50
+       scaled s) >> toas_copy (~0.03 scaled s), so toas_copy is lost entirely in
+       the float32 subtraction and tp ≈ -L1minCosmu.  Consequently
+       ``xt = fac1 * tp ≈ -xL``, making ``xL + xt ≈ 0`` (catastrophically
+       wrong).  Since phase_prefac = w0/fac1 ≈ 1e6 amplifies this error, the
+       phase error reaches O(1e-3) rad even though individual terms are accurate
+       to float32.  Fix: rewrite all odd-power-sum and even-power-difference
+       terms in the pulsar-phase Taylor series using the cancellation-free
+       variables ``xs = fac1 * toas_copy`` (= xL + xt algebraically) and
+       ``xd = xL - xt`` (= fac1 * (2*L1mc - toas_copy), safely computed as the
+       sum of two near-equal positives).
+
+    Parameters
+    ----------
+    toas_shifted_scaled : array
+        (npsrs, ntoas) shaped array. Values should be TOAs - tref in nano-seconds.
+    psr_pos : array
+        (npsrs, 3) shaped array of Cartesian unit vectors to each pulsar.
+    source_params : array
+        Shape (8,): log10(Mc/Msun), log10(fgw/Hz), cos(inc), psi,
+        log10(h), cos(gwtheta), gwphi, phase0.
+    psr_phases : array
+        Shape (npsrs,). CW phase at each pulsar.
+    psr_dists : array
+        Shape (npsrs,). Distance to each pulsar [kpc].
+
+    Returns
+    -------
+    res : array
+        Shape (npsrs, ntoas). Timing delays in nanoseconds [ns].
+    """
+    f32 = jnp.float32
+
+    psr_pos      = jnp.asarray(psr_pos,      dtype=jnp.float32)
+    source_params = jnp.asarray(source_params, dtype=jnp.float32)
+    psr_phases   = jnp.asarray(psr_phases,   dtype=jnp.float32)
+    psr_dists    = jnp.asarray(psr_dists,    dtype=jnp.float32)
+
+    # --- unpack source parameters
+    log10_mc, log10_fgw, cos_inc, psi, log10_h, cos_gwtheta, gwphi, phase0 = source_params
+    p_phases = psr_phases[:, None]
+
+    # --- convert units, rescaled by cw_renorm so all intermediate values are O(1)
+    #     mc  [s * cw_renorm],  fgw [Hz / cw_renorm]
+    mc   = f32(10.0) ** log10_mc * f32(utils.Tsun * utils.cw_renorm)
+    fgw  = f32(10.0) ** log10_fgw / f32(utils.cw_renorm)
+    w0   = f32(jnp.pi) * fgw
+
+    gwtheta = jnp.arccos(cos_gwtheta)
+    inc     = jnp.arccos(cos_inc)
+
+    # pulsar distances in scaled light-seconds
+    p_dists = psr_dists * f32(utils.kpc / utils.c * utils.cw_renorm)
+
+    # luminosity distance (same scaling as mc / fgw gives dist * cw_renorm)
+    dist = f32(2.0) * mc ** f32(5.0 / 3.0) * (f32(jnp.pi) * fgw) ** f32(2.0 / 3.0) / f32(10.0) ** log10_h
+
+    # --- antenna patterns and geometry
+    fplus, fcross, cosMu = utils.create_gw_antenna_pattern(gwtheta, gwphi, psr_pos)
+
+    L1minCosmu = (p_dists * (f32(1.0) - cosMu))[:, None]   # (npsrs, 1)
+    tp = toas_shifted_scaled - L1minCosmu                             # pulsar retarded time (npsrs, ntoas)
+
+    # --- shared constants
+    phase0_orb = phase0 / f32(2.0)
+    mc53 = mc ** f32(5.0 / 3.0)
+    fac1 = f32(256.0 / 5.0) * mc53 * w0 ** f32(8.0 / 3.0)
+    # prefactor shared by both phase series: w0^{-5/3} / (32 mc^{5/3}) = w0 / fac1 * (8/5)
+    phase_prefac = w0 / fac1
+
+    # --- Earth phase  (Taylor in x_e = fac1 * t_e, valid for |x_e| << 1)
+    x_e  = fac1 * toas_shifted_scaled
+    phase = (phase0_orb
+             + phase_prefac * (x_e
+                               + f32(3.0 / 16.0)   * x_e ** 2
+                               + f32(11.0 / 128.0) * x_e ** 3
+                               + f32(209.0 / 4096.0) * x_e ** 4
+                               + f32(5643.0 / 163840.0) * x_e ** 5))
+
+    # --- Pulsar phase  (Taylor in xL = fac1*L and xt = fac1*tp)
+    #
+    # When L1minCosmu >> toas_copy (distant pulsars), computing tp in float32
+    # loses toas_copy entirely, making xt ≈ -xL and xL+xt ≈ 0 instead of xs.
+    # Multiplied by phase_prefac ≈ 1e6 this gives O(1e-3) rad phase error.
+    # Fix: rewrite the Taylor series in the cancellation-free variables
+    #   xs = fac1 * toas_copy  (= xL + xt algebraically)
+    #   xd = xL - xt           (= fac1*(2*L1mc - toas_copy), no cancellation)
+    # then reconstruct each sum/difference via Newton's identities:
+    #   xL+xt    = xs
+    #   xL²-xt²  = xs * xd
+    #   xL³+xt³  = xs * (xs² + 3*xd²) / 4
+    #   xL⁴-xt⁴  = xs * xd * (xs² + xd²) / 2
+    #   xL⁵+xt⁵  = xs * (xs⁴ + 10*xs²*xd² + 5*xd⁴) / 16
+    xL = fac1 * L1minCosmu        # (npsrs, 1)
+    xt = fac1 * tp                # (npsrs, ntoas)
+    xs = x_e                      # fac1 * toas_copy, (npsrs, ntoas)
+    xd = xL - xt                  # ≈ 2*xL (no cancellation), (npsrs, ntoas)
+
+    xs2 = xs ** 2;  xd2 = xd ** 2
+    phase_p = (phase0_orb
+               + p_phases
+               + phase_prefac * f32(8.0 / 5.0) * (
+                   f32(5.0 / 8.0)        * xs
+                   - f32(15.0 / 128.0)   * xs * xd
+                   + f32(55.0 / 1024.0)  * xs * (xs2 + f32(3.0) * xd2) / f32(4.0)
+                   - f32(1045.0 / 32768.0) * xs * xd * (xs2 + xd2) / f32(2.0)
+                   + f32(5643.0 / 262144.0) * xs * (xs2 ** 2 + f32(10.0) * xs2 * xd2 + f32(5.0) * xd2 ** 2) / f32(16.0)))
+
+    # --- Earth amplitude  (Taylor in x_e)
+    amp_prefac = mc53 / (dist * w0 ** f32(1.0 / 3.0)) / f32(utils.cw_renorm)
+    alpha = amp_prefac * (f32(1.0)
+                          - f32(1.0 / 8.0)      * x_e
+                          - f32(7.0 / 128.0)    * x_e ** 2
+                          - f32(35.0 / 1024.0)  * x_e ** 3
+                          - f32(805.0 / 32768.0)  * x_e ** 4
+                          - f32(4991.0 / 262144.0) * x_e ** 5)
+
+    # --- Pulsar amplitude  (Taylor in xt = fac1 * tp)
+    alpha_p = amp_prefac * (f32(1.0)
+                            - f32(1.0 / 8.0)      * xt
+                            - f32(7.0 / 128.0)    * xt ** 2
+                            - f32(35.0 / 1024.0)  * xt ** 3
+                            - f32(805.0 / 32768.0)  * xt ** 4
+                            - f32(4991.0 / 262144.0) * xt ** 5)
+
+    # --- waveform coefficients
+    inc_factor = f32(-0.5) * (f32(3.0) + jnp.cos(f32(2.0) * inc))
+    At   = jnp.sin(f32(2.0) * phase)   * inc_factor
+    Bt   = f32(2.0) * jnp.cos(f32(2.0) * phase)   * cos_inc
+    At_p = jnp.sin(f32(2.0) * phase_p) * inc_factor
+    Bt_p = f32(2.0) * jnp.cos(f32(2.0) * phase_p) * cos_inc
+
+    c2psi = jnp.cos(f32(2.0) * psi)
+    s2psi = jnp.sin(f32(2.0) * psi)
+
+    rplus    = alpha   * (-At   * c2psi + Bt   * s2psi)
+    rcross   = alpha   * ( At   * s2psi + Bt   * c2psi)
+    rplus_p  = alpha_p * (-At_p * c2psi + Bt_p * s2psi)
+    rcross_p = alpha_p * ( At_p * s2psi + Bt_p * c2psi)
+
+    res = fplus[:, None] * (rplus_p - rplus) + fcross[:, None] * (rcross_p - rcross)
+    return res * f32(utils.renorm)
 
