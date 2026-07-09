@@ -1,6 +1,6 @@
 # Prometheus
 
-_Prometheus_ is a fast pulsar timing array analysis package which supports common models for intrinsic pulsar noise and a stochastic gravitational wave background. Deterministic signals are supported, so fast fully joint analyses may be performed.
+_Prometheus_ is a fast pulsar timing array analysis package which supports common models for intrinsic pulsar noise and a stochastic gravitational wave background. Deterministic signals are supported, so fast fully joint analyses may be performed. The methods of this package are described in the paper: [arXiv:2607.06834](https://arxiv.org/abs/2607.06834).
 
 On a NVIDIA GeForce RTX 3090, parameter estimation on the NANOGrav 15-year data set takes ~15 minutes!
 
