@@ -266,3 +266,40 @@ def create_gw_antenna_pattern(gwtheta, gwphi, psr_pos):
     cosMu = -omhatdotpos
 
     return fplus, fcross, cosMu
+
+
+def timing_model_svd(M):
+    """Create an more stable basis for the timing model design matrix using SVD.
+
+    This function is used to create a basis U which represents the timing model
+    design matrix M and normalizes each of the basis vectors. This can be used
+    as a more stable alternative to M in timing model marginalization. 
+
+    This takes an SVD of the design matrix M, and returns only the left singular 
+    vectors U as the new basis. This works since during the marginalization process,
+    the singular values aren't important when integrating over the whole range of
+    timing model coefficients. Likewise, the right singular vectors are only
+    used to project into the original basis, which we do not need.
+
+    Parameters
+    ----------
+    M : array
+        The design matrix for the timing model. [ntoas, nparams]
+
+    Returns
+    -------
+    array
+        The left singular vectors of the design matrix M, which can be used as a more
+        stable basis for timing model marginalization. [ntoas, nparams]
+    """
+    U, C, V = np.linalg.svd(M, full_matrices=False)
+    # Return just the left singular vector.
+    # The singular values are a weighting factor that isn't important when marginalizing.
+    # the right singular vectors are used to project into the original basis, which isn't
+    # important for marginalization either.
+
+    # NORMALIZATION
+    norm = np.sqrt(np.sum(U**2, axis=0))
+    mat = U / norm
+    mat[:, norm == 0] = 0.
+    return mat

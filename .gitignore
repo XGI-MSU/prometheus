@@ -224,14 +224,15 @@ __marimo__/
 # don't save NG20 data
 data/ng20_chimeless/
 data/NG20_chimeless/
+data/NG20/
 
 # targeted search chains from NG15 analysis
 examples/chains/SDSS_J072908.71+400836.6_det.h5
 examples/chains/SDSS_J153636.22+044127.0_det.h5
 
 # don't save stuff still in testing
-examples/advanced_modeling/nondiag_phi.ipynb
 tests/PP_plots
 tests/simulations
 src/prometheus/simulate.py
+examples/advanced_modeling/freq_corr.ipynb
 

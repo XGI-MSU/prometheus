@@ -161,3 +161,58 @@ def ln_p_DM(value, dist, err):
     lnprob = jnp.log(y / area + 1e-12)
     lnprob = jnp.where(value > 0, lnprob, -jnp.inf)
     return lnprob
+
+
+def build_psr_dists_lnprior(dataset):
+    """
+    Implement parallax and DM based priors on pulsar distance
+    from Arzoumanian+ 2023. i.e. apply `ln_p_PX` and `ln_p_DM`
+    to the correct pulsars. Pulsars with distances from 'other'
+    methods use a normal prior.
+
+    Parameters
+    ----------
+    dataset : Prometheus.data.Data
+        Instantiation of Prometheus.data.Data object.
+    
+    Returns
+    -------
+    psr_dists_lnprior : callable
+        Function which takes deterministic model parameters,
+        pulsar phases, and pulsar distances and outputs the
+        log-density of this prior.
+    """
+    
+    # which pulsar distances are measured with parallax and DM
+    where_PX = jnp.where(dataset.psr_dist_method == 'PX')[0]
+    where_DM = jnp.where(dataset.psr_dist_method == 'DM')[0]
+    where_other = jnp.where(dataset.psr_dist_method == 'other')[0]
+    where_not_other = jnp.ones(dataset.npsrs, dtype=bool)
+    where_not_other = where_not_other.at[where_other].set(False)
+
+    # measured pulsar distance and uncertainty
+    psr_dists_measured = jnp.array(dataset.psr_dists_measured)
+    psr_dists_std = jnp.array(dataset.psr_dists_std)
+
+    # the additional prior weighting take the determinisitic model parameters as input
+    def psr_dists_lnprior(det_params, psr_phases, psr_dists):
+
+        # prior on pulsar distance when measured with parallax
+        lnpriors_PX_dist = vmap(lambda x, y, z : ln_p_PX(x, y, z),
+                                    in_axes=(0, 0, 0))(psr_dists, psr_dists_measured, psr_dists_std)
+        lnprior_PX_summed = jnp.sum(lnpriors_PX_dist[where_PX])
+
+        # prior on pulsar distance when measured with DM
+        lnpriors_DM_dist = vmap(lambda x, y, z : ln_p_DM(x, y, z),
+                                    in_axes=(0, 0, 0))(psr_dists, psr_dists_measured, psr_dists_std)
+        lnprior_DM_summed = jnp.sum(lnpriors_DM_dist[where_DM])
+
+        # Prometheus still samples pulsar distance using a normal prior,
+        # so we must subtract that log-density here
+        ln_normal_corrections = 0.5 * (psr_dists - psr_dists_measured)**2 / psr_dists_std**2
+        ln_normal_correction = jnp.sum(ln_normal_corrections[where_not_other])
+
+        # new "advanced" pulsar distance prior
+        return lnprior_PX_summed + lnprior_DM_summed + ln_normal_correction
+    
+    return psr_dists_lnprior

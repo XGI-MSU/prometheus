@@ -293,7 +293,6 @@ class Data:
                 num_coeff_det = 2 * Nf_det
 
                 # sparse TOAs for CW FFT
-                toas = psr.toas
                 sparse_toas_det = np.linspace(np.min(tmin) - window_ext, np.max(tmax) + window_ext,
                                             num_coeff_det + 2, endpoint=False)
                 Nsparse = sparse_toas_det.shape[0]
@@ -315,7 +314,7 @@ class Data:
                 TDNr = ndiag.solve(res, left_array=F_D)
                 
                 # use parallax and DM methods for pulsar distance
-                if self.psr_dists_dict is not None:
+                if self.psr_dists_dict is not None and psr.name in list(self.psr_dists_dict.keys()):
                     pdist = self.psr_dists_dict[psr.name]
                     psr_dist_and_uncertainty = (pdist[0], pdist[1])
                     if pdist[2] == 'PX':  # parallax distance method
@@ -347,10 +346,10 @@ class Data:
                     pdist = psr_dist_and_uncertainty,
                     psr_dist_method = psr_dist_method,
                     # min_toa = np.min(toas),
-                    toas = psr.toas,
+                    # toas = psr.toas,
                     # residuals = psr.residuals,
-                    F = pta_psr.get_basis()[0],
-                    FD = F_D,
+                    # F = pta_psr.get_basis()[0],
+                    # FD = F_D,
                     num_coeff_det = num_coeff_det,
                     TDNTD = TDNTD,
                     TNTD = TNTD,

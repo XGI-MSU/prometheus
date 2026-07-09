@@ -10,6 +10,8 @@ from typing import Callable, Optional
 
 from . import utilities as utils
 from .data import Data
+from . import spectra
+from .FFTInt import build_phi_from_chat
 
 
 class SpectralModel:
@@ -45,7 +47,9 @@ class SpectralModel:
                  name : str,
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
+                 get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
                  get_phi_cube_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+                 freq_corrs : Optional[bool] = False,
                  additional_ln_factor : Optional[Callable] = None,
                  ):
         
@@ -55,12 +59,27 @@ class SpectralModel:
         self.param_maxs = self.parameter_bounds[..., 1]
         self.nparams_base = self.param_mins.shape[0]
         self.data = data
+        self.get_phi_diag_func = get_phi_diag_func
+        self.freq_corrs = freq_corrs
         self.additional_ln_factor = additional_ln_factor
 
         if get_phi_cube_func is None:
             raise ValueError("get_phi_cube_func must be provided.")
 
         self._get_phi_cube_func = get_phi_cube_func
+
+        if self.freq_corrs:
+            if self.get_phi_diag_func is spectra.free_spectral:
+                # free_spec_spline = spectra.make_cubic_spline_free_spectral_model(self.data.freqs)
+                # free_spec_spline = spectra.make_linear_spline_free_spectral_model(self.data.freqs)
+                free_spec_spline = spectra.make_akima_spline_free_spectral_model(self.data.freqs, extrapolate='akima')
+                get_phi_free_spec = build_phi_from_chat(free_spec_spline, self.data, oversample=8)
+                self.get_phi_func = lambda x, f: get_phi_free_spec(x)
+            else:
+                get_phi_spec_func = build_phi_from_chat(self.get_phi_diag_func, self.data, oversample=8)
+                self.get_phi_func = lambda x, f: get_phi_spec_func(x)
+        else:
+            self.get_phi_func = lambda x, f: jnp.diag(self.get_phi_diag_func(x, f))
 
     def get_phi_cube(self, params, freqs):
         """
@@ -122,21 +141,15 @@ class IndependentSpectralModel(SpectralModel):
                  name : str,
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
-                 get_phi_diag_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
-                 get_phi_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
+                 get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
+                 freq_corrs : Optional[bool] = False,
                  additional_ln_factor : Optional[Callable] = None
                  ):
         
         self.get_phi_diag_func = get_phi_diag_func
-        self.get_phi_func = get_phi_func
+        self.freq_corrs = freq_corrs
         self.additional_ln_factor = additional_ln_factor
 
-        if self.get_phi_diag_func is None and self.get_phi_func is None:
-            raise ValueError('Either a get_phi_diag_func or get_phi_func must be provided.')
-        if self.get_phi_diag_func is not None and self.get_phi_func is not None:
-            raise ValueError('Only one of get_phi_diag_func or get_phi_func may be provided.')
-
-        
         def get_phi_cube_func(params, freqs):
             """
             Gets the prior covariance matrix for the Fourier coefficients
@@ -169,6 +182,8 @@ class IndependentSpectralModel(SpectralModel):
             name=name,
             parameter_bounds=parameter_bounds,
             data=data,
+            get_phi_diag_func=self.get_phi_diag_func,
+            freq_corrs=self.freq_corrs,
             get_phi_cube_func=get_phi_cube_func,
             additional_ln_factor=additional_ln_factor,
         )
@@ -219,30 +234,21 @@ class CommonSpectralModel(SpectralModel):
                  parameter_bounds : list | np.ndarray | jnp.ndarray,
                  data : Data,
                  correlation_matrix : str | np.ndarray | jnp.ndarray,
-                 get_phi_diag_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
-                 get_phi_func : Optional[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]] = None,
+                 get_phi_diag_func : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray],
                  nfreqs : Optional[int] = None,
+                 freq_corrs : Optional[bool] = False,
                  additional_ln_factor : Optional[Callable] = None):
         self.data = data
         self.get_phi_diag_func = get_phi_diag_func
-        self.get_phi_func = get_phi_func
         self.nfreqs = nfreqs or data.nfreqs
+        self.freq_corrs = freq_corrs
         self.additional_ln_factor = additional_ln_factor
-
-        if self.get_phi_diag_func is None and self.get_phi_func is None:
-            raise ValueError('Either a get_phi_diag_func or get_phi_func must be provided.')
-        if self.get_phi_diag_func is not None and self.get_phi_func is not None:
-            raise ValueError('Only one of get_phi_diag_func or get_phi_func may be provided.')
 
         # zeros to append to spectrum if user requests
         # fewer frequency bins than in data object
         self.zeros = jnp.zeros(2 * (self.data.nfreqs - self.nfreqs))
         self.block_zeros = jnp.zeros((self.zeros.shape[0], self.zeros.shape[0]))
         self.num_coeffs = 2 * self.nfreqs
-
-        # zero out the higher frequency components of get_phi_func if specified by the user
-        if self.get_phi_func is not None and self.nfreqs != self.data.nfreqs:
-            raise ValueError(f'''When a get_phi_func is provided, nfreqs must match that of the data object. Set nfreqs={self.data.nfreqs}.''')
 
         # if 'HD' or 'CURN', build correlation matrix for user
         if isinstance(correlation_matrix, str):
@@ -286,6 +292,8 @@ class CommonSpectralModel(SpectralModel):
             name=name,
             parameter_bounds=parameter_bounds,
             data=data,
+            get_phi_diag_func=self.get_phi_diag_func,
+            freq_corrs=self.freq_corrs,
             get_phi_cube_func=get_phi_cube_func,
             additional_ln_factor=additional_ln_factor,
         )

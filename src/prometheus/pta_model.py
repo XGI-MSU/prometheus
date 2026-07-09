@@ -86,6 +86,15 @@ class PTAModel:
             self.mode = 'standard'
             self.data = self.psr_model.data
 
+        # decide whether or not to include frequency correlations
+        if self.mode == 'standard':
+            if self.psr_model.freq_corrs or self.gwb_model.freq_corrs:
+                self.freq_corrs = True
+            else:
+                self.freq_corrs = False
+        else:
+            self.freq_corrs = False
+
         # useful attributes
         self.psr_names = self.data.psr_names
         self.npsrs = self.data.npsrs
@@ -97,8 +106,14 @@ class PTAModel:
         else:
             self.include_det_model = True
 
+        # check whether or not to include inter-frequency correlations
+        if self.freq_corrs:
+            self.sampling_model = self.sampling_model_with_freq_corrs
+        else:
+            self.sampling_model = self.sampling_model_no_freq_corrs
 
-    def sampling_model(self, T=1.0):
+
+    def sampling_model_no_freq_corrs(self, T=1.0):
         """
         Construct the NumPyro probabilistic sampling model.
 
@@ -227,14 +242,18 @@ class PTAModel:
             numpyro.factor('ln_likelihood_det_addition', lnlike_det_add)
 
 
-    def marginalized_sampling_model(self):
+    def sampling_model_with_freq_corrs(self):
         """
-        NumPyro sampling model with marginalized pulsar noise coefficients.
+        NumPyro sampling model with marginalized pulsar noise coefficients
+        and a deterministic signal contribution in a Fourier basis.
+        The standardizing transform uses det-subtracted residuals for efficiency.
+        The cross term a_gwb . TNTDas is absorbed into the shifted residuals and
+        must NOT be added again in the deterministic likelihood correction.
         """
 
         # pulsar noise hyper-parameters
         psr_params = numpyro.sample(name=self.psr_model.name,
-                                fn=dist.Uniform(low=self.psr_model.param_mins,  
+                                fn=dist.Uniform(low=self.psr_model.param_mins,
                                                 high=self.psr_model.param_maxs,).expand([self.npsrs, self.psr_model.nparams_base]))
 
         # GWB hyper-parameters
@@ -242,19 +261,56 @@ class PTAModel:
                                     fn=dist.Uniform(low=self.gwb_model.param_mins,
                                                     high=self.gwb_model.param_maxs))
         
+        if self.include_det_model:
+            # sample parameters of deterministic signal model
+            det_params = numpyro.sample(self.det_model.name, dist.Uniform(self.det_model.param_mins,
+                                                                    self.det_model.param_maxs))
+            if self.det_model.with_psr_params:
+                psr_phases = numpyro.sample('psr_phases', dist.Uniform(0., 2. * jnp.pi).expand([self.npsrs]))
+                standard_psr_dists = numpyro.sample('standard_psr_dists', dist.Normal().expand([self.npsrs]))
+                psr_dists = numpyro.deterministic('psr_dists', self.data.psr_dists_measured + standard_psr_dists * self.data.psr_dists_std)
+            else:
+                psr_phases = None
+                psr_dists = None
+
+            # get Fourier coefficients of deterministic signal
+            a_det = self.det_model.get_coeffs_func(det_params, psr_phases, psr_dists)
+            # inner products with deterministic Fourier coefficients:
+            # TNTDas[p] = (F^T N^{-1} F_D a_D)[p], shape (Npsrs, 2*Nf_full)
+            TNTDas = vmap(lambda x, y: jnp.dot(x, y))(self.data.TNTDs, a_det)
+
+            # additional ln-factor for deterministic parameters specified by user
+            if self.det_model.additional_ln_factor is not None:
+                ln_factor_det = self.det_model.additional_ln_factor(det_params, psr_phases, psr_dists)
+                numpyro.factor('additional_ln_factor_det', ln_factor_det)
+
         # draw whitened Fourier coefficients for the background
-        z = numpyro.sample(name='z', fn=dist.Normal().expand([self.npsrs, self.ncomponents]))
+        gwb_nf = self.gwb_model.nfreqs
+        gwb_na = 2 * gwb_nf
+        z = numpyro.sample(name='z', fn=dist.Normal().expand([self.npsrs, gwb_na]))
 
         # NumPyro adds a standard normal probability density for the line above
         # this is not in the posterior, so we need to subtract it manually
         numpyro.factor('ln_inverse_normal_correction', 0.5 * jnp.sum(z**2))
-        
+
         # constants needed for likelihood evaluation
         FNrs = self.data.FNrs
         FNFs = self.data.FNFs
+        FNFs_gwb = self.data.FNFs[:, :gwb_na, :gwb_na]
+        FNFs_psr_gwb = self.data.FNFs[:, :, :gwb_na]
+
+        # shift residuals by the deterministic signal:
+        # FNrs_eff = F^T N^{-1} (delta_t - h), used throughout for both
+        # RN marginalization and the GWB standardizing transform / likelihood.
+        # The cross term a_gwb.T @ TNTDas is thereby absorbed and must NOT
+        # be added again in the deterministic likelihood correction below.
+        if self.include_det_model:
+            FNrs_eff = FNrs - TNTDas                    # (Npsrs, 2*Nf_full)
+        else:
+            FNrs_eff = FNrs                    # (Npsrs, 2*Nf_full)
+        FNrs_gwb_eff = FNrs_eff[:, :gwb_na]        # (Npsrs, gwb_na)
 
         # prior covariance for pulsar noise coefficients (Np, 2Nf, 2Nf)
-        # psr_phi = self.psr_model.get_freq_corr_phi_cube(psr_params, self.data.freqs)
         psr_phi = vmap(self.psr_model.get_phi_func, in_axes=(0, None))(psr_params, self.data.freqs)
         _, psr_phiinvs, psr_phi_ln_dets = posterior.cholesky_inverse_det_phi(psr_phi)
 
@@ -263,26 +319,29 @@ class PTAModel:
         psr_sigma_inv_chol_factors = vmap(lambda x: jsl.cho_factor(x, lower=True))(psr_sigma_inv)
         psr_sigma_inv_ln_dets = vmap(lambda cf: 2 * jnp.sum(jnp.log(jnp.diag(cf[0]) / utils.renorm)))(psr_sigma_inv_chol_factors)
 
-        # additional terms needed for likelihood and standardizing transform
-        Linv_FNFs = vmap(lambda cf, FNF: jsl.solve_triangular(cf[0], FNF, lower=True))(psr_sigma_inv_chol_factors, FNFs)
-        Linv_FNrs = vmap(lambda cf, FNr: jsl.solve_triangular(cf[0], FNr, lower=True))(psr_sigma_inv_chol_factors, FNrs)
+        # additional terms needed for RN marginalization and standardizing transform,
+        # all using det-subtracted effective residuals
+        Linv_FNFs = vmap(lambda cf, FNF: jsl.solve_triangular(cf[0], FNF, lower=True))(psr_sigma_inv_chol_factors, FNFs_psr_gwb)
+        Linv_FNrs = vmap(lambda cf, FNr: jsl.solve_triangular(cf[0], FNr, lower=True))(psr_sigma_inv_chol_factors, FNrs_eff)
+        Linv_FNFs_psr_gwb = vmap(lambda cf, FNF: jsl.solve_triangular(cf[0], FNF, lower=True))(psr_sigma_inv_chol_factors, FNFs_psr_gwb)
         FNF_psr_sigma_FNFs = vmap(lambda A: A.T @ A)(Linv_FNFs)
         rNF_psr_sigma_FNrs = vmap(lambda v: v.T @ v)(Linv_FNrs)
-        rNF_psr_sigma_FNFs = vmap(lambda v, A: v.T @ A)(Linv_FNrs, Linv_FNFs)
+        rNF_psr_sigma_FNFs = vmap(lambda v, A: v.T @ A)(Linv_FNrs, Linv_FNFs_psr_gwb)
 
         # covariance of GWB Fourier coefficients
         gwb_phi_spec = self.gwb_model.get_phi_func(gwb_params, self.data.freqs)
+        gwb_phi_spec = gwb_phi_spec[:gwb_na, :gwb_na]
         gwb_phi_spec_cho_factors = jsl.cho_factor(gwb_phi_spec, lower=True)
         gwb_phi_inv_spec = jsl.cho_solve((gwb_phi_spec_cho_factors[0], True),
-                                             jnp.identity(gwb_phi_spec_cho_factors[0].shape[0]))
+                                        jnp.identity(gwb_phi_spec_cho_factors[0].shape[0]))
         gwb_phi_spec_lndet = 2 * jnp.sum(jnp.log(jnp.diag(jnp.linalg.cholesky(gwb_phi_spec)) / utils.renorm))
-        gwb_phi_inv = jnp.kron(self.gwb_model.inv_correlation_matrix, gwb_phi_inv_spec)    # (Np * 2 * Nf, Np * 2 * Nf)
         gwb_phi_lndet = self.npsrs * gwb_phi_spec_lndet + self.ncomponents * self.gwb_model.lndet_correlation_matrix
 
-        # do standardizing transform
-        gwb_sigma_inv = FNFs + gwb_phi_inv_spec[None, :, :] - FNF_psr_sigma_FNFs
+        # standardizing transform using det-subtracted effective residuals:
+        # estimates MAP GWB coefficients conditioned on (delta_t - h)
+        gwb_sigma_inv = FNFs_gwb + gwb_phi_inv_spec[None, :, :] - FNF_psr_sigma_FNFs
         Sigma_inv_L = vmap(lambda x: jsl.cholesky(x, lower=True))(gwb_sigma_inv)
-        y = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=0))(Sigma_inv_L, -FNrs + rNF_psr_sigma_FNFs)
+        y = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=0))(Sigma_inv_L, -FNrs_gwb_eff + rNF_psr_sigma_FNFs)
         a_hat = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=1))(Sigma_inv_L, y)
         Lz = vmap(lambda x, y: jsl.solve_triangular(x, y, lower=True, trans=1))(Sigma_inv_L, z)
         a_gwb = a_hat + Lz
@@ -292,19 +351,35 @@ class PTAModel:
         lndet_Jac = -jnp.sum(jnp.log(jnp.diagonal(Sigma_inv_L, axis1=1, axis2=2)))
         numpyro.factor('ln_Jac', lndet_Jac)
 
-        # evaluate the likelihood
-        Ws = FNFs - FNF_psr_sigma_FNFs
-        Vs = -FNrs + rNF_psr_sigma_FNFs
+        # evaluate the marginalized likelihood using det-subtracted effective residuals.
+        # the cross term a_gwb . TNTDas_gwb is already present via FNrs_gwb_eff in Vs,
+        # so ln_likelihood_det_addition must NOT add it again.
+        Ws = FNFs_gwb - FNF_psr_sigma_FNFs
+        Vs = -FNrs_gwb_eff + rNF_psr_sigma_FNFs
         ln_likelihood_val = -0.5 * jnp.sum(vmap(lambda a, W: jnp.dot(a, jnp.dot(W, a)))(a_gwb, Ws))
         ln_likelihood_val += jnp.sum(vmap(lambda a, V: jnp.dot(a, V))(a_gwb, Vs))
         ln_likelihood_val += 0.5 * jnp.sum(rNF_psr_sigma_FNrs)
         ln_likelihood_val += -0.5 * jnp.sum(psr_phi_ln_dets) - 0.5 * jnp.sum(psr_sigma_inv_ln_dets)
         numpyro.factor('lnlike', ln_likelihood_val)
 
-        # evaluate the prior
+        # evaluate the GWB prior
+        # ln_prior_val = -0.5 * jnp.einsum('pf,pq,fg,qg->',
+        #                                 a_gwb,
+        #                                 self.gwb_model.inv_correlation_matrix,
+        #                                 gwb_phi_inv_spec,
+        #                                 a_gwb)
+        gwb_phi_inv = jnp.kron(self.gwb_model.inv_correlation_matrix, gwb_phi_inv_spec)
         ln_prior_val = -0.5 * jnp.dot(a_gwb.flatten(), jnp.dot(gwb_phi_inv, a_gwb.flatten()))
+        # inner = jnp.dot(jnp.dot(a_gwb, gwb_phi_inv_spec), a_gwb.T)  # shape (npsr, npsr)
+        # ln_prior_val = -0.5 * jnp.sum(self.gwb_model.inv_correlation_matrix * inner)
         ln_prior_val += -0.5 * gwb_phi_lndet
         numpyro.factor('lnprior', ln_prior_val)
+
+        if self.include_det_model:
+            # deterministic likelihood correction: only the two purely-deterministic terms
+            lnlike_det_purely = (jnp.sum(vmap(lambda x, y: jnp.dot(x, y))(a_det, self.data.TDNrs))
+                                - 0.5 * jnp.sum(vmap(lambda x, y: jnp.dot(x, jnp.dot(y, x)))(a_det, self.data.TDNTDs)))
+            numpyro.factor('ln_likelihood_det_addition', lnlike_det_purely)
 
 
     def get_param_names_and_shapes(self, alt_model=None):
