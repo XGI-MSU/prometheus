@@ -299,10 +299,10 @@ class Data:
                 freqs_forFFT = np.fft.fftfreq(Nsparse, Tspan_ext / Nsparse)
 
                 # Fourier design matrix for CW
-                F_D = np.zeros((toas.shape[0], num_coeff_det))
+                F_D = np.zeros((psr.toas.shape[0], num_coeff_det))
                 for j in range(Nf_det):
-                    F_D[:, 2 * j] = np.sin(2. * np.pi * freqs_forFFT[j + 1] * toas)
-                    F_D[:, 2 * j + 1] = np.cos(2. * np.pi * freqs_forFFT[j + 1] * toas)
+                    F_D[:, 2 * j] = np.sin(2. * np.pi * freqs_forFFT[j + 1] * psr.toas)
+                    F_D[:, 2 * j + 1] = np.cos(2. * np.pi * freqs_forFFT[j + 1] * psr.toas)
 
                 # arrays needed for posterior evaluation with CW in model
                 T = pta_psr.get_basis(params)[0]
