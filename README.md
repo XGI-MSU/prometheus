@@ -16,19 +16,9 @@ The posterior is implemented in [JAX](https://jax.readthedocs.io/en/latest/) whi
 
 ## Installation
 
-This package is hosted in a **private GitHub repository** under the `XGI-MSU` organization. You must be invited via email or GitHub username to access the repository.
-
-Install directly with pip using SSH:
-
+Install directly with pip:
 ```bash
-pip install git+ssh://git@github.com/XGI-MSU/prometheus.git
-```
-
-or install using a GitHub
-Personal Access Token (PAT):
-
-```bash
-pip install git+https://<TOKEN>@github.com/XGI-MSU/prometheus.git
+    pip install git+https://github.com/XGI-MSU/prometheus.git
 ```
 
 ## Requirements & Conventions
