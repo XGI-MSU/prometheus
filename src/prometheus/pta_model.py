@@ -40,9 +40,9 @@ def batched_cholesky_identity_plus_gram(Bs):
 
     The derivative of the Cholesky factorization is hand-written and evaluated in
     float32 from the rounded L (Murray 2016, arXiv:1602.07527): float64 matrix
-    algebra is slow on consumer GPUs, and the derivative does not need M itself, so it
-    does not inherit its dynamic range. The gradient is accurate to ~1e-3, and since
-    the error is a deterministic function of the position, NUTS stays exact.
+    algebra is slow on consumer GPUs, and the derivative is ordered so that it forms
+    neither M nor M_bar, so it does not inherit their dynamic range. Since the
+    remaining error is a deterministic function of the position, NUTS stays exact.
 
     Returns
     -------
@@ -62,16 +62,17 @@ def _batched_cholesky_identity_plus_gram_fwd(Bs):
 
 def _batched_cholesky_identity_plus_gram_bwd(res, Ls_bar):
     # for M = L L^T: M_bar = sym(L^{-T} Phi(L^T L_bar) L^{-1}), Phi = lower triangle
-    # with halved diagonal; and for M = I + B B^T: B_bar = 2 M_bar B
+    # with halved diagonal; and for M = I + B B^T: B_bar = 2 M_bar B, evaluated as
+    # B_bar = L^{-T} (P + P^T) L^{-1} B with P = Phi(L^T L_bar), solving for L^{-1} B
+    # first (M_bar spans the dynamic range of M, while L^{-1} B has norm <= 1)
     Ls, Bs = res
     k = Ls.shape[1]
     with jax.default_matmul_precision('highest'):
         P = jnp.einsum('pji,pjk->pik', Ls, Ls_bar)
         P = jnp.tril(P) - 0.5 * P * jnp.eye(k, dtype=Ls.dtype)
-        X = vmap(lambda L, P: jsl.solve_triangular(L, P, lower=True, trans='T'))(Ls, P)
-        S = vmap(lambda L, X: jsl.solve_triangular(L, X.T, lower=True, trans='T').T)(Ls, X)
-        Ms_bar = 0.5 * (S + jnp.swapaxes(S, 1, 2))
-        return (2. * jnp.einsum('pkj,pjn->pkn', Ms_bar, Bs),)
+        X = vmap(lambda L, B: jsl.solve_triangular(L, B, lower=True))(Ls, Bs)
+        S = jnp.einsum('pkj,pjn->pkn', P + jnp.swapaxes(P, 1, 2), X)
+        return (vmap(lambda L, S: jsl.solve_triangular(L, S, lower=True, trans='T'))(Ls, S),)
 
 
 batched_cholesky_identity_plus_gram.defvjp(_batched_cholesky_identity_plus_gram_fwd,
